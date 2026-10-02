@@ -32,3 +32,13 @@ After implementation: **12 passed**. After Black formatting: **12 passed in 3.39
 ## Concerns
 
 No blocking concerns. Markdown structure support here covers ATX headings, as represented by the approved task fixtures; heading-less or unterminated-fence text uses the existing splitter. Semantic units pass through that splitter even when short, retaining the caller's configured splitting behavior.
+
+## Independent-review fix
+
+Review identified an Important metadata exclusion regression: constructing semantic units dropped the source's `excluded_embed_metadata_keys` and `excluded_llm_metadata_keys`, so result chunks exposed metadata loaders had deliberately excluded.
+
+Fix commit: `355cecf1be6d3e41d2ebc33ba1ff4df931b62c18` — `fix: preserve metadata exclusions in semantic chunks`.
+
+Added parametrized regression coverage for both Markdown and FAQ with a large budget (one semantic chunk) and an eight-token budget (multiple fallback pieces), asserting both exclusion lists on every result and no mutation of the source lists. RED before the fix: **4 failed, 12 passed**; all four failures showed that the embedding exclusion list was lost. The smallest fix copies both source exclusion lists into each semantic unit; the existing token wrapper restores them onto each final result.
+
+Focused GREEN after formatting: `uv run pytest libs/kotaemon/tests/test_knowledge_chunking.py -q` → **16 passed in 4.07s**. Black completed; both working and staged `git diff --check` passed. No unrelated changes.
