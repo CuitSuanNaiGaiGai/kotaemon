@@ -55,4 +55,4 @@ No blocking concerns. The brief did not provide an enumerated list for the eight
 
 ## Commit
 
-Pending at report creation; SHA will be recorded after committing.
+Implementation commit: `e516fa314ebb516b46dbeca6bd5e2e21742c70d6`. The report was committed in a follow-up documentation commit.
