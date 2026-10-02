@@ -71,6 +71,24 @@ def test_exact_chinese_entity_scopes_to_one_document_and_is_serializable():
     assert json.loads(json.dumps(plan.to_dict()))["source_ids"] == ["zhang-san"]
 
 
+def test_chinese_context_prefix_of_a_compound_falls_back_to_global():
+    catalog = MemoryCatalog(
+        [
+            source(
+                "zhang-san",
+                virtual_path="/people/张三.md",
+                document_name="张三.md",
+                entity={"person": "张三"},
+            )
+        ]
+    )
+
+    plan = QueryPlanner().plan("张三工作室的职责是什么？", catalog)
+
+    assert plan.source_ids is None
+    assert plan.confidence < QueryPlanner.HIGH_CONFIDENCE
+
+
 def test_chinese_entity_match_does_not_accept_a_longer_partial_name():
     catalog = MemoryCatalog(
         [

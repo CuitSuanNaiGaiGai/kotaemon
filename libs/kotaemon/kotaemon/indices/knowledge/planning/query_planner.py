@@ -61,6 +61,8 @@ _CJK_CONTEXT_AFTER = (
     "完成",
     "曾",
     "提到",
+    "了",
+    "过",
 )
 _CJK_CONTEXT_BEFORE = "、，。；：？?！!（()【】及与和跟向请找问到让对于关于是把由在同"
 _GLOB_CHARS = frozenset("*?[]")
@@ -111,6 +113,23 @@ def _is_word_char(char: str) -> bool:
     )
 
 
+def _has_cjk_context_boundary(query: str, offset: int) -> bool:
+    """Consume known query-context terms; reject unknown CJK compounds."""
+    while offset < len(query) and _is_cjk(query[offset]):
+        context = next(
+            (
+                candidate
+                for candidate in sorted(_CJK_CONTEXT_AFTER, key=len, reverse=True)
+                if query.startswith(candidate, offset)
+            ),
+            None,
+        )
+        if context is None:
+            return False
+        offset += len(context)
+    return True
+
+
 def _find_mentions(
     query: str, value: str, known_values: set[str]
 ) -> list[tuple[int, int]]:
@@ -147,9 +166,7 @@ def _find_mentions(
         if all_cjk:
             left_ok = not before or not _is_cjk(before) or before in _CJK_CONTEXT_BEFORE
             right_ok = (
-                not after
-                or not _is_cjk(after)
-                or any(query.startswith(context, end) for context in _CJK_CONTEXT_AFTER)
+                not after or not _is_cjk(after) or _has_cjk_context_boundary(query, end)
             )
         else:
             left_ok = not _is_word_char(before)

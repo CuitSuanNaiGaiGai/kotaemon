@@ -62,6 +62,34 @@ def test_catalog_filters_private_visibility_and_allowed_source_ids(tmp_path):
                     user="user-a",
                     note={"knowledge": "not-a-dict"},
                 ),
+                Source(
+                    id="literal-none",
+                    name="literal-none.md",
+                    path="/tmp/upload-4",
+                    user="user-a",
+                    note={
+                        "knowledge": {
+                            "source_type": "markdown",
+                            "virtual_path": "/team/literal-none.md",
+                            "document_name": "literal-none.md",
+                            "entity": {"person": "None"},
+                        }
+                    },
+                ),
+                Source(
+                    id="missing-person",
+                    name="missing-person.md",
+                    path="/tmp/upload-5",
+                    user="user-a",
+                    note={
+                        "knowledge": {
+                            "source_type": "markdown",
+                            "virtual_path": "/team/missing-person.md",
+                            "document_name": "missing-person.md",
+                            "entity": {},
+                        }
+                    },
+                ),
             ]
         )
         session.add_all(
@@ -104,6 +132,10 @@ def test_catalog_filters_private_visibility_and_allowed_source_ids(tmp_path):
         )
         == ()
     )
+    assert catalog.resolve_source_ids(
+        entity_filters={"person": "None"},
+        allowed_source_ids=["literal-none", "missing-person"],
+    ) == ("literal-none",)
     assert (
         catalog.resolve_source_ids(
             allowed_source_ids=[],

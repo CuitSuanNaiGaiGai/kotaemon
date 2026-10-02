@@ -91,7 +91,8 @@ class KnowledgeCatalog:
             ):
                 continue
             if not all(
-                self._normalize_scalar(source.entity.get(key))
+                key in source.entity
+                and self._normalize_scalar(source.entity[key])
                 == self._normalize_scalar(value)
                 for key, value in filters.items()
             ):
