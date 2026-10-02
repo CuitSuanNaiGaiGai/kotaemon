@@ -4,6 +4,7 @@
 
 - Implementation: `8691e88765890c9df7c71343b04373bb45f8f461` — `feat: add deterministic knowledge retrieval planning`
 - Base: `79770d372f9de5273ed8e3d83e2e1f84b21190cd`
+- Review follow-up: `ad01fe07c91de326f4bb4d1aa4478a8be48f1d1e` — `fix: tighten knowledge scope matching`
 
 ## Files and interfaces
 
@@ -46,6 +47,28 @@ uv run pytest libs/kotaemon/tests/test_knowledge_metadata.py libs/kotaemon/tests
 ```
 
 Result: **26 passed**, with 4 existing `PydanticDeprecatedSince20` warnings from `libs/kotaemon/kotaemon/embeddings/openai.py`.
+
+### GPT-6 Sol Medium review follow-up
+
+Added regression cases for a literal entity value of `"None"` beside a source with no `person` entity, and for `张三工作室...` beside the accepted `张三实习期间...` query.
+
+RED command:
+
+```text
+uv run pytest libs/kotaemon/tests/test_knowledge_planner.py::test_chinese_context_prefix_of_a_compound_falls_back_to_global libs/ktem/ktem_tests/test_knowledge_catalog.py::test_catalog_filters_private_visibility_and_allowed_source_ids -q
+```
+
+Result: **2 failed as expected**. The planner incorrectly scoped `张三工作室...` to Zhang San, and the catalog incorrectly included the source missing `person` because `None` stringified to `"none"`.
+
+The catalog now requires the entity key to exist before value comparison. CJK continuation matching now consumes known query-context terms and falls back to global when an unknown adjacent CJK compound remains. The accepted `张三实习期间做了什么工作？` case remains covered.
+
+GREEN/recheck command:
+
+```text
+uv run pytest libs/kotaemon/tests/test_knowledge_metadata.py libs/kotaemon/tests/test_knowledge_planner.py libs/ktem/ktem_tests/test_knowledge_catalog.py libs/kotaemon/tests/test_indexing_retrieval.py -q
+```
+
+Result: **27 passed**, with the same 4 existing Pydantic deprecation warnings. Black, isort, and `git diff --check` passed after the follow-up.
 
 Formatting and whitespace checks passed:
 
