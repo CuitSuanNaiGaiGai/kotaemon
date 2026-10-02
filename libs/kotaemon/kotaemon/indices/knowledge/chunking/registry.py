@@ -5,8 +5,10 @@ from collections.abc import Callable, Iterable
 from kotaemon.indices.splitters import BaseSplitter
 
 from .base import ChunkStrategy
+from .code import PythonCodeChunkStrategy
 from .faq import FAQChunkStrategy
 from .markdown import MarkdownChunkStrategy
+from .structured import StructuredChunkStrategy
 from .token import TokenChunkStrategy
 
 _STRATEGIES: dict[str, Callable[..., ChunkStrategy]] = {}
@@ -26,3 +28,5 @@ def get_chunk_strategy(source_type: str, token_splitter: BaseSplitter) -> ChunkS
 
 register_chunk_strategy(["wiki", "markdown"], MarkdownChunkStrategy)
 register_chunk_strategy(["faq"], FAQChunkStrategy)
+register_chunk_strategy(["code"], PythonCodeChunkStrategy)
+register_chunk_strategy(["pdf", "ppt", "excel"], StructuredChunkStrategy)

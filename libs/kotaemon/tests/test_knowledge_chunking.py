@@ -5,6 +5,112 @@ from kotaemon.indices.knowledge.chunking import get_chunk_strategy
 from kotaemon.indices.splitters import TokenSplitter
 
 
+def test_python_symbols_keep_methods_linked_to_class_and_source_metadata():
+    document = Document(
+        text='import os\n\nclass Coupon:\n    """Coupon rules."""\n    rate = 1\n\n'
+        "    @staticmethod\n    def apply():\n        return True\n\n"
+        "async def calculate():\n    return 1\n",
+        metadata={"source_type": "code", "file_name": "coupon.py", "file_id": "f1"},
+        excluded_llm_metadata_keys=["file_id"],
+    )
+    chunks = get_chunk_strategy("code", TokenSplitter(chunk_size=100)).split(document)
+    class_chunk = next(
+        c
+        for c in chunks
+        if c.metadata.get("class_name") == "Coupon"
+        and not c.metadata.get("function_name")
+    )
+    method_chunk = next(c for c in chunks if c.metadata.get("function_name") == "apply")
+    assert "Coupon rules." in class_chunk.text
+    assert "rate = 1" in class_chunk.text
+    assert "def apply" not in class_chunk.text
+    assert "@staticmethod" in method_chunk.text
+    assert method_chunk.metadata["parent_id"] == class_chunk.doc_id
+    assert method_chunk.metadata["class_name"] == "Coupon"
+    assert method_chunk.metadata["language"] == "python"
+    assert any(c.metadata.get("function_name") == "calculate" for c in chunks)
+    assert any("import os" in c.text for c in chunks)
+    assert all(c.metadata["document_id"] == "f1" for c in chunks)
+    assert all(c.metadata["chunk_id"] == c.doc_id for c in chunks)
+    assert all(c.excluded_llm_metadata_keys == ["file_id"] for c in chunks)
+
+
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        ("def broken(:\n    pass", "broken.py"),
+        ("value = 1", "constants.py"),
+        ("function calculate() { return 1; }", "calculate.ts"),
+    ],
+)
+def test_code_fallback_keeps_unparsed_or_symbol_free_text(text, name):
+    document = Document(text=text, metadata={"source_type": "code", "file_name": name})
+    chunks = get_chunk_strategy("code", TokenSplitter(chunk_size=100)).split(document)
+    assert [c.text for c in chunks] == [text]
+
+
+def test_oversized_python_symbol_keeps_symbol_metadata():
+    document = Document(
+        text="def calculate():\n" + "    value = 1\n" * 100,
+        metadata={"source_type": "code", "file_name": "long.py"},
+    )
+    chunks = get_chunk_strategy(
+        "code", TokenSplitter(chunk_size=12, chunk_overlap=0)
+    ).split(document)
+    assert len(chunks) > 1
+    assert all(c.metadata["function_name"] == "calculate" for c in chunks)
+    assert len({c.metadata["parent_id"] for c in chunks}) == 1
+
+
+def test_python_inline_class_keeps_declaration():
+    document = Document(
+        text="class Coupon: pass",
+        metadata={"source_type": "code", "file_name": "coupon.py"},
+    )
+    chunks = get_chunk_strategy("code", TokenSplitter(chunk_size=100)).split(document)
+    assert "class Coupon:" in chunks[0].text
+    assert "pass" in chunks[0].text
+
+
+def test_pdf_heading_metadata_and_page_survive_secondary_splitting():
+    document = Document(
+        text="calibration " * 50,
+        metadata={"source_type": "pdf", "heading": "Setup", "page_label": 4},
+    )
+    chunks = get_chunk_strategy(
+        "pdf", TokenSplitter(chunk_size=8, chunk_overlap=0)
+    ).split(document)
+    assert len(chunks) > 1
+    assert all(c.metadata["section_path"] == ["Setup"] for c in chunks)
+    assert all(c.metadata["page_label"] == 4 for c in chunks)
+    flat = Document(text="flat PDF", metadata={"source_type": "pdf"})
+    assert [
+        c.text
+        for c in get_chunk_strategy("pdf", TokenSplitter(chunk_size=100)).split(flat)
+    ] == [flat.text]
+
+
+def test_ppt_and_excel_strategy_preserve_semantic_boundaries():
+    slide = Document(
+        text="title\nbody",
+        metadata={
+            "source_type": "ppt",
+            "slide_number": 2,
+            "slide_title": "Architecture",
+            "file_name": "overview.pptx",
+        },
+    )
+    chunks = get_chunk_strategy("ppt", TokenSplitter(chunk_size=100)).split(slide)
+    assert chunks[0].metadata["section_path"] == ["Architecture"]
+    assert chunks[0].metadata["presentation"] == "overview.pptx"
+    row = Document(
+        text="person: Zhang San",
+        metadata={"source_type": "excel", "sheet_name": "Week 1", "row_number": 2},
+    )
+    chunks = get_chunk_strategy("excel", TokenSplitter(chunk_size=100)).split(row)
+    assert chunks[0].metadata["section_path"] == ["Week 1", "Row 2"]
+
+
 def test_markdown_chunks_keep_heading_paths():
     document = Document(
         text="# Interns\n\nintro\n\n## Zhang San\n\nBuilt a RAG API.",
