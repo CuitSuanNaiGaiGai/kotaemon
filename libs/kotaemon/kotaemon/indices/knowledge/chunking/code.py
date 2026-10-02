@@ -1,7 +1,9 @@
 """Python semantic units using the standard library AST parser."""
 
 import ast
+import io
 import textwrap
+import tokenize
 from pathlib import PurePosixPath
 
 from kotaemon.base import Document
@@ -44,6 +46,12 @@ class PythonCodeChunkStrategy:
                 chunks.extend(self._function(document, node))
             else:
                 module_lines.append(self._text(document.text, node))
+        # AST spans omit leading/trailing comments and comments between class
+        # members. Keep any comments absent from the emitted units retrievable.
+        emitted_text = "\n".join([*(chunk.text for chunk in chunks), *module_lines])
+        for token in tokenize.generate_tokens(io.StringIO(document.text).readline):
+            if token.type == tokenize.COMMENT and token.string not in emitted_text:
+                module_lines.append(token.string)
         if module_lines:
             unit = semantic_unit(document, "\n\n".join(module_lines), ["module"])
             unit.metadata["language"] = "python"

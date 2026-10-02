@@ -1,8 +1,49 @@
 import pandas as pd
+import pytest
 
 from kotaemon.base import Document
 from kotaemon.loaders.excel_loader import ExcelRowReader
 from kotaemon.loaders.pptx_loader import PptxReader, group_slide_documents
+
+
+@pytest.mark.parametrize(
+    "selection, expected", [(0, ["Week 1"]), ([0, 1], ["Week 1", "Week 2"])]
+)
+def test_excel_numeric_sheet_selection_records_real_tab_names(
+    tmp_path, selection, expected
+):
+    file = tmp_path / "weekly.xlsx"
+    with pd.ExcelWriter(file) as writer:
+        for name in ("Week 1", "Week 2"):
+            pd.DataFrame([{"work": name}]).to_excel(
+                writer, index=False, sheet_name=name
+            )
+    documents = ExcelRowReader().load_data(file, sheet_name=selection)
+    assert [document.metadata["sheet_name"] for document in documents] == expected
+
+
+def test_excel_parse_fallback_receives_selected_sheet_and_reader_options(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class Fallback:
+        def load_data(self, file, extra_info=None, **kwargs):
+            calls.append(kwargs)
+            return [Document(text="legacy", metadata=extra_info or {})]
+
+    def fail(*args, **kwargs):
+        raise ValueError("bad spreadsheet")
+
+    monkeypatch.setattr(pd, "read_excel", fail)
+    documents = ExcelRowReader(fallback_reader=Fallback()).load_data(
+        tmp_path / "broken.xlsx",
+        sheet_name="Week 1",
+        include_sheetname=True,
+        extra_info={"file_id": "f1"},
+    )
+    assert calls == [{"sheet_name": "Week 1", "include_sheetname": True}]
+    assert documents[0].metadata["file_id"] == "f1"
 
 
 def test_excel_rows_keep_headers_sheet_names_and_original_row_numbers(tmp_path):

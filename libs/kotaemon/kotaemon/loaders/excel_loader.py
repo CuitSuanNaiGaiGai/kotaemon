@@ -216,11 +216,33 @@ class ExcelRowReader(BaseReader):
                 config = {"skip_blank_lines": False, **self._pandas_config}
                 sheets = {file.stem: pd.read_csv(file, **config)}
             else:
+                selected_sheets = sheet_name
+                selections = (
+                    sheet_name if isinstance(sheet_name, list) else [sheet_name]
+                )
+                if any(isinstance(selection, int) for selection in selections):
+                    workbook_options = {
+                        key: self._pandas_config[key]
+                        for key in ("engine", "storage_options", "engine_kwargs")
+                        if key in self._pandas_config
+                    }
+                    with pd.ExcelFile(file, **workbook_options) as workbook:
+                        selections = [
+                            (
+                                workbook.sheet_names[selection]
+                                if isinstance(selection, int)
+                                else selection
+                            )
+                            for selection in selections
+                        ]
+                    selected_sheets = (
+                        selections if isinstance(sheet_name, list) else selections[0]
+                    )
                 sheets = pd.read_excel(
-                    file, sheet_name=sheet_name, **self._pandas_config
+                    file, sheet_name=selected_sheets, **self._pandas_config
                 )
                 if not isinstance(sheets, dict):
-                    sheets = {sheet_name: sheets}
+                    sheets = {selected_sheets: sheets}
         except Exception:
             fallback = self._fallback_reader
             if fallback is None:
@@ -230,7 +252,10 @@ class ExcelRowReader(BaseReader):
                     fallback = TxtReader()
                 else:
                     fallback = PandasExcelReader(pandas_config=self._pandas_config)
-            return fallback.load_data(file, extra_info=metadata, **kwargs)
+            fallback_options = dict(kwargs)
+            if file.suffix.lower() != ".csv":
+                fallback_options["sheet_name"] = sheet_name
+            return fallback.load_data(file, extra_info=metadata, **fallback_options)
         documents = []
         header = self._pandas_config.get("header", 0)
         header_end = max(header) if isinstance(header, list) else header

@@ -72,6 +72,17 @@ def test_python_inline_class_keeps_declaration():
     assert "pass" in chunks[0].text
 
 
+def test_python_preserves_comments_outside_ast_symbol_spans():
+    document = Document(
+        text="# business rule\nclass Coupon:\n    # method policy\n"
+        "    def apply(self):\n        return True\n\n# trailing rule\n",
+        metadata={"source_type": "code", "file_name": "coupon.py"},
+    )
+    chunks = get_chunk_strategy("code", TokenSplitter(chunk_size=100)).split(document)
+    for comment in ("# business rule", "# method policy", "# trailing rule"):
+        assert any(comment in chunk.text for chunk in chunks)
+
+
 def test_pdf_heading_metadata_and_page_survive_secondary_splitting():
     document = Document(
         text="calibration " * 50,
