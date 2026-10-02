@@ -71,6 +71,31 @@ class KnowledgeService:
 
 **Acceptance:** Zhang San's exact scope excludes Li Si/Wang Wu from selected evidence; global fallback can still find legacy records; no selected UI files still yields `[]`; vector-only backend is represented as such; the configured reranker remains in use. Do not claim backend-neutral BM25 unless the tested docstore implements it.
 
+### Task 7 interface corrections and required regressions
+
+The existing store interfaces use different argument names:
+
+```python
+BaseVectorStore.query(embedding, top_k=..., ids=chunk_ids, **kwargs)
+BaseDocumentStore.query(query, top_k=..., doc_ids=chunk_ids)
+```
+
+`LlamaIndexVectorStore.query` maps `ids` to `VectorStoreQuery.node_ids`. Existing `VectorRetrieval` passes `doc_ids=scope` to vector queries, which is only forwarded as a backend kwarg and does not establish the node-ID constraint. Keep the public `scope` argument if needed for compatibility, but translate it to `ids=scope` for vector search and `doc_ids=scope` for full-text search. Never pass `doc_ids` to vector search.
+
+Before implementation, tests must assert:
+
+1. Vector-only and hybrid vector branches receive `ids=[...]` and never receive `doc_ids`; the hybrid docstore branch receives the same chunk IDs as `doc_ids`.
+2. `scope=[]` returns immediately with no embedding, vector, or docstore calls in vector/text/hybrid modes; `scope=None` follows the global path.
+3. A backend that ignores its ID/filter argument cannot leak out-of-scope results: post-filter by chunk ID before reranking and enforce again after reranking. A docstore fake that ignores `doc_ids` is covered too.
+4. A test double verifies `ids` becomes `VectorStoreQuery.node_ids` at the LlamaIndex adapter boundary.
+5. `doc_store.get(vs_ids)` may return documents in another order. Associate vector scores with IDs before fetching and reconstruct results by ID; test reverse-order `get`.
+6. Hybrid merge de-duplicates by `doc_id` in deterministic order.
+7. Global lexical search calls `doc_store.query(..., doc_ids=None)` only when available. An empty lexical result or unsupported backend is recorded as unavailable/empty, not claimed as BM25.
+8. Any zero-hit retry remains inside the caller-visible/selected source IDs; empty caller visibility never broadens to global.
+9. Worker-thread exceptions are captured and surfaced/recorded rather than silently treated as successful empty retrieval, while preserving usable results from the other branch when safe.
+
+These requirements supplement Task 7's TDD and acceptance criteria; task ordering and file scope remain unchanged.
+
 ## Task 8 — Agent KnowledgeService and QA bridge (Phase 4)
 
 **Files:** new `libs/kotaemon/kotaemon/indices/knowledge/retrieval/{__init__,knowledge_service}.py`; ktem assembly/adapter in `libs/ktem/ktem/index/file/pipelines.py` or a focused new `libs/ktem/ktem/index/file/knowledge_service.py`; update `libs/ktem/ktem/index/file/index.py` only if an explicit factory is needed; tests in `libs/kotaemon/tests/test_knowledge_service.py` and `libs/ktem/ktem_tests/test_knowledge_service_integration.py`.
@@ -114,4 +139,3 @@ class KnowledgeService:
 ## Final review gate
 
 After Task 11 review, a GPT-6 Sol Medium reviewer checks the full committed diff and the end-to-end report against the original request. Run the focused suite and repository-required checks once on the final committed branch, inspect output before claiming completion, then present the branch for integration. Do not merge or publish merely because unit tests pass.
-
