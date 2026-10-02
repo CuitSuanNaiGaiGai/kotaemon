@@ -42,3 +42,15 @@ Black completed. Focused Flake8 passed with the repository's max-line-length=88 
 ## Concerns / limits
 
 No blocking concerns. The implementation remains conservative: Python is the supported AST language, PDF consumes reader-provided headings, and PPT requires reliable parser boundaries. Advanced CSV configurations that suppress rows implicitly (for example comment filtering or skip_blank_lines=True) can alter physical row accounting; default CSV behavior preserves blank rows, and explicit skiprows is supported. Actual PPT parser execution was not exercised; the focused reader fixture validates parser delegation and grouping with its documented page_number metadata. Default reader integration belongs to Task 4.
+
+## Independent-review fixes
+
+Follow-up implementation commit: `29da3649bc3485747f558f72f86ca39b7f55d53d` — `fix: preserve selected sheets and code comments`.
+
+Review identified two Important issues: numeric worksheet selection recorded the index rather than the real workbook tab name, and parse fallback omitted the selected worksheet. It also identified a Minor code-content loss: AST extraction omitted comments outside node spans.
+
+Added regression tests before fixes for a numeric single worksheet and a numeric worksheet list, selected-sheet fallback with include_sheetname and source metadata, and comments before a class, between class members, and after a symbol. Focused RED: **4 failed, 29 passed in 4.12s**. The numeric cases returned `["0"]` / `["0", "1"]`; fallback received include_sheetname but no sheet_name; leading code comments were absent from every chunk.
+
+The smallest fixes resolve numeric selectors through pandas ExcelFile.sheet_names, forward the original sheet_name and existing reader options on spreadsheet fallback, and preserve otherwise omitted COMMENT tokens in the module knowledge unit using the standard-library tokenizer. No new dependency, schema or Task 4 change.
+
+Focused GREEN after fixes and formatting: `uv run pytest libs/kotaemon/tests/test_knowledge_chunking.py libs/kotaemon/tests/test_structured_readers.py -q` → **33 passed in 4.21s**. Black, focused Flake8 and working/staged diff checks passed. All review findings were addressed.
