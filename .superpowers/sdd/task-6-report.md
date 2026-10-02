@@ -5,6 +5,7 @@
 - Implementation: `8691e88765890c9df7c71343b04373bb45f8f461` — `feat: add deterministic knowledge retrieval planning`
 - Base: `79770d372f9de5273ed8e3d83e2e1f84b21190cd`
 - Review follow-up: `ad01fe07c91de326f4bb4d1aa4478a8be48f1d1e` — `fix: tighten knowledge scope matching`
+- Review follow-up 2: `aa63805113cb57677f20bf43f896d60c21614f40` — `fix: detect conjoined CJK entity mentions`
 
 ## Files and interfaces
 
@@ -69,6 +70,28 @@ uv run pytest libs/kotaemon/tests/test_knowledge_metadata.py libs/kotaemon/tests
 ```
 
 Result: **27 passed**, with the same 4 existing Pydantic deprecation warnings. Black, isort, and `git diff --check` passed after the follow-up.
+
+### GPT-6 Sol Medium review follow-up 2
+
+Added a regression for the visible entities 张三 and 李四 with query `张三和李四`.
+
+RED command:
+
+```text
+uv run pytest libs/kotaemon/tests/test_knowledge_planner.py::test_conjoined_chinese_entities_are_ambiguous_and_fall_back_to_global -q
+```
+
+Result: **1 failed as expected**. The planner recognized 李四 only and returned a high-confidence 李四-only scope.
+
+The CJK continuation parser now recognizes a conjunction followed by another exact catalog value. This lets it record both Zhang San and Li Si mentions, so the planner marks the query ambiguous and selects global fallback. The `张三实习期间做了什么工作？`, `张三工作室...`, and `张三丰...` regressions remain covered.
+
+Final Task 6 suite command:
+
+```text
+uv run pytest libs/kotaemon/tests/test_knowledge_metadata.py libs/kotaemon/tests/test_knowledge_planner.py libs/ktem/ktem_tests/test_knowledge_catalog.py libs/kotaemon/tests/test_indexing_retrieval.py -q
+```
+
+Result: **28 passed**, with the same 4 existing Pydantic deprecation warnings. Black, isort, and `git diff --check` passed after this follow-up.
 
 Formatting and whitespace checks passed:
 
