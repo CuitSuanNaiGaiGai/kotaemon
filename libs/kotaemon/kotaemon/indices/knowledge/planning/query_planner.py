@@ -65,6 +65,7 @@ _CJK_CONTEXT_AFTER = (
     "过",
 )
 _CJK_CONTEXT_BEFORE = "、，。；：？?！!（()【】及与和跟向请找问到让对于关于是把由在同"
+_CJK_CONJUNCTIONS = ("以及", "和", "及", "与", "跟", "、")
 _GLOB_CHARS = frozenset("*?[]")
 
 
@@ -113,9 +114,38 @@ def _is_word_char(char: str) -> bool:
     )
 
 
-def _has_cjk_context_boundary(query: str, offset: int) -> bool:
-    """Consume known query-context terms; reject unknown CJK compounds."""
+def _has_cjk_context_boundary(query: str, offset: int, known_values: set[str]) -> bool:
+    """Consume query-context terms and conjoined metadata values.
+
+    A known catalog value after a conjunction is treated as another exact
+    mention, so the planner sees both sides of queries such as ``张三和李四``.
+    Unknown adjacent CJK text remains a boundary failure.
+    """
     while offset < len(query) and _is_cjk(query[offset]):
+        conjunction = next(
+            (
+                candidate
+                for candidate in _CJK_CONJUNCTIONS
+                if query.startswith(candidate, offset)
+            ),
+            None,
+        )
+        if conjunction is not None:
+            offset += len(conjunction)
+            value = next(
+                (
+                    candidate
+                    for candidate in sorted(known_values, key=len, reverse=True)
+                    if all(_is_cjk(char) for char in candidate)
+                    and query.startswith(candidate, offset)
+                ),
+                None,
+            )
+            if value is None:
+                return False
+            offset += len(value)
+            continue
+
         context = next(
             (
                 candidate
@@ -166,7 +196,9 @@ def _find_mentions(
         if all_cjk:
             left_ok = not before or not _is_cjk(before) or before in _CJK_CONTEXT_BEFORE
             right_ok = (
-                not after or not _is_cjk(after) or _has_cjk_context_boundary(query, end)
+                not after
+                or not _is_cjk(after)
+                or _has_cjk_context_boundary(query, end, known_values)
             )
         else:
             left_ok = not _is_word_char(before)
