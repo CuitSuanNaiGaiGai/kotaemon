@@ -89,6 +89,7 @@ class VectorIndexing(BaseIndexing):
             print("Adding embeddings to vector store")
             self.vector_store.add(
                 embeddings=embeddings,
+                metadatas=[doc.metadata or {} for doc in docs],
                 ids=[t.doc_id for t in docs],
             )
 

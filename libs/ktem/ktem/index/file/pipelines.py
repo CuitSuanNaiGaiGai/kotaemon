@@ -46,6 +46,8 @@ from kotaemon.indices.ingests.files import (
     unstructured,
     web_reader,
 )
+from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
+from kotaemon.indices.knowledge.metadata import normalize_knowledge_metadata
 from kotaemon.indices.rankings import BaseReranking, LLMReranking, LLMTrulensScoring
 from kotaemon.indices.splitters import BaseSplitter, TokenSplitter
 
@@ -351,6 +353,22 @@ class IndexPipeline(BaseComponent):
             vector_store=self.VS, doc_store=self.DS, embedding=self.embedding
         )
 
+    def _split_and_normalize_text_docs(self, documents):
+        output = []
+        for document in documents:
+            document.metadata = normalize_knowledge_metadata(document)
+            if self.splitter:
+                strategy = get_chunk_strategy(
+                    document.metadata["source_type"], self.splitter
+                )
+                chunks = strategy.split(document)
+            else:
+                chunks = [document]
+            for chunk in chunks:
+                chunk.metadata = normalize_knowledge_metadata(chunk)
+                output.append(chunk)
+        return output
+
     def handle_docs(self, docs, file_id, file_name) -> Generator[Document, None, int]:
         s_time = time.time()
         text_docs = []
@@ -371,10 +389,9 @@ class IndexPipeline(BaseComponent):
             doc.metadata["page_label"]: doc.doc_id for doc in thumbnail_docs
         }
 
-        if self.splitter:
-            all_chunks = self.splitter(text_docs)
-        else:
-            all_chunks = text_docs
+        all_chunks = self._split_and_normalize_text_docs(text_docs)
+        for document in non_text_docs + thumbnail_docs:
+            document.metadata = normalize_knowledge_metadata(document)
 
         # add the thumbnails doc_id to the chunks
         for chunk in all_chunks:
@@ -538,7 +555,12 @@ class IndexPipeline(BaseComponent):
 
         return file_id
 
-    def finish(self, file_id: str, file_path: str | Path) -> str:
+    def finish(
+        self,
+        file_id: str,
+        file_path: str | Path,
+        knowledge_metadata: dict | None = None,
+    ) -> str:
         """Finish the indexing"""
         with Session(engine) as session:
             stmt = select(self.Source).where(self.Source.id == file_id)
@@ -547,6 +569,7 @@ class IndexPipeline(BaseComponent):
                 return file_id
 
             item = result[0]
+            note = dict(item.note or {})
 
             # populate the number of tokens
             doc_ids_stmt = select(self.Index.target_id).where(
@@ -557,10 +580,35 @@ class IndexPipeline(BaseComponent):
             token_func = self.get_token_func()
             if doc_ids and token_func:
                 docs = self.DS.get(doc_ids)
-                item.note["tokens"] = sum([len(token_func(doc.text)) for doc in docs])
+                note["tokens"] = sum([len(token_func(doc.text)) for doc in docs])
 
             # populate the note
-            item.note["loader"] = self.get_from_path("loader").__class__.__name__
+            note["loader"] = self.get_from_path("loader").__class__.__name__
+            file_name = file_path.name if isinstance(file_path, Path) else file_path
+            normalized = normalize_knowledge_metadata(
+                Document(
+                    text="",
+                    metadata={
+                        "file_id": file_id,
+                        "file_name": file_name,
+                        **(knowledge_metadata or {}),
+                    },
+                )
+            )
+            knowledge = dict(note.get("knowledge") or {})
+            knowledge.update(
+                {
+                    key: normalized[key]
+                    for key in (
+                        "source_type",
+                        "virtual_path",
+                        "document_name",
+                        "entity",
+                    )
+                }
+            )
+            note["knowledge"] = knowledge
+            item.note = note
 
             session.add(item)
             session.commit()
@@ -602,7 +650,11 @@ class IndexPipeline(BaseComponent):
         raise NotImplementedError
 
     def stream(
-        self, file_path: str | Path, reindex: bool, **kwargs
+        self,
+        file_path: str | Path,
+        reindex: bool = False,
+        knowledge_metadata: dict | None = None,
+        **kwargs,
     ) -> Generator[Document, None, tuple[str, list[Document]]]:
         # check if the file is already indexed
         if isinstance(file_path, Path):
@@ -644,13 +696,14 @@ class IndexPipeline(BaseComponent):
 
         extra_info["file_id"] = file_id
         extra_info["collection_name"] = self.collection_name
+        extra_info.update(knowledge_metadata or {})
 
         yield Document(f" => Converting {file_name} to text", channel="debug")
         docs = self.loader.load_data(file_path, extra_info=extra_info)
         yield Document(f" => Converted {file_name} to text", channel="debug")
         yield from self.handle_docs(docs, file_id, file_name)
 
-        self.finish(file_id, file_path)
+        self.finish(file_id, file_path, knowledge_metadata=knowledge_metadata)
 
         yield Document(f" => Finished indexing {file_name}", channel="debug")
         return file_id, docs
@@ -787,7 +840,7 @@ class IndexDocumentPipeline(BaseFileIndexIndexing):
                 chunk_size=chunk_size or 1024,
                 chunk_overlap=chunk_overlap or 256,
                 separator="\n\n",
-                backup_separators=["\n", ".", "\u200B"],
+                backup_separators=["\n", ".", "\u200b"],
             ),
             run_embedding_in_thread=self.run_embedding_in_thread,
             Source=self.Source,
@@ -816,12 +869,18 @@ class IndexDocumentPipeline(BaseFileIndexIndexing):
         if not isinstance(file_paths, list):
             file_paths = [file_paths]
 
+        metadata_by_path = kwargs.pop("knowledge_metadata_by_path", {}) or {}
+
         file_ids: list[str | None] = []
         errors: list[str | None] = []
         all_docs = []
 
         n_files = len(file_paths)
         for idx, file_path in enumerate(file_paths):
+            original_path = file_path
+            knowledge_metadata = metadata_by_path.get(original_path)
+            if knowledge_metadata is None:
+                knowledge_metadata = metadata_by_path.get(str(original_path))
             if self.is_url(file_path):
                 file_name = file_path
             else:
@@ -836,7 +895,10 @@ class IndexDocumentPipeline(BaseFileIndexIndexing):
             try:
                 pipeline = self.route(file_path)
                 file_id, docs = yield from pipeline.stream(
-                    file_path, reindex=reindex, **kwargs
+                    file_path,
+                    reindex=reindex,
+                    knowledge_metadata=knowledge_metadata,
+                    **kwargs,
                 )
                 all_docs.extend(docs)
                 file_ids.append(file_id)
