@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from pathlib import Path
-from typing import Optional, Sequence, cast
+from typing import Any, Optional, Sequence, cast
 
 from theflow.settings import settings as flowsettings
 
@@ -16,6 +17,7 @@ from .rankings import BaseReranking, LLMReranking
 
 VECTOR_STORE_FNAME = "vectorstore"
 DOC_STORE_FNAME = "docstore"
+logger = logging.getLogger(__name__)
 
 
 class VectorIndexing(BaseIndexing):
@@ -132,8 +134,103 @@ class VectorRetrieval(BaseRetrieval):
             documents = documents[:top_k]
         return documents
 
+    @staticmethod
+    def _normalize_ids(ids: Sequence[str] | None) -> list[str] | None:
+        if ids is None:
+            return None
+        if isinstance(ids, str):
+            return [ids]
+        return list(dict.fromkeys(str(doc_id) for doc_id in ids if doc_id is not None))
+
+    @staticmethod
+    def _deduplicate_docs(
+        documents: list[RetrievedDocument],
+    ) -> list[RetrievedDocument]:
+        unique: list[RetrievedDocument] = []
+        seen: set[str] = set()
+        for document in documents:
+            doc_id = document.doc_id
+            if doc_id is not None and doc_id in seen:
+                continue
+            if doc_id is not None:
+                seen.add(doc_id)
+            unique.append(document)
+        return unique
+
+    @staticmethod
+    def _filter_to_scope(
+        documents: list[RetrievedDocument], scope: list[str] | None
+    ) -> list[RetrievedDocument]:
+        if scope is None:
+            return documents
+        allowed = set(scope)
+        return [document for document in documents if document.doc_id in allowed]
+
+    @staticmethod
+    def _lexical_available(doc_store: BaseDocumentStore) -> bool:
+        """Honor an explicit backend capability flag and retain legacy adapters."""
+        capability = getattr(doc_store, "supports_lexical_search", None)
+        if capability is not None:
+            return bool(capability)
+        query_method = getattr(type(doc_store), "query", None)
+        return callable(query_method) and query_method is not BaseDocumentStore.query
+
+    @staticmethod
+    def _trace_update(trace: dict[str, Any] | None, **fields):
+        if trace is None:
+            return
+        try:
+            trace.update(fields)
+        except Exception:
+            logger.exception("Could not update optional retrieval trace")
+
+    def _vector_candidates(
+        self,
+        embedding: list[float],
+        candidate_k: int,
+        scope: list[str] | None,
+        query_kwargs: dict[str, Any],
+    ) -> list[RetrievedDocument]:
+        assert self.doc_store is not None
+        _, scores, ids = self.vector_store.query(
+            embedding=embedding,
+            top_k=candidate_k,
+            ids=scope,
+            **query_kwargs,
+        )
+
+        # Store adapters may return documents in a different order than requested.
+        # Associate every score with the vector result ID before loading documents.
+        score_by_id: dict[str, float] = {}
+        unique_ids: list[str] = []
+        seen: set[str] = set()
+        for index, doc_id in enumerate(ids):
+            if doc_id is None or doc_id in seen:
+                continue
+            if scope is not None and doc_id not in scope:
+                continue
+            seen.add(doc_id)
+            unique_ids.append(doc_id)
+            score_by_id[doc_id] = scores[index] if index < len(scores) else -1.0
+
+        if not unique_ids:
+            return []
+
+        docs_by_id = {doc.doc_id: doc for doc in self.doc_store.get(unique_ids)}
+        return [
+            RetrievedDocument(**docs_by_id[doc_id].to_dict(), score=score_by_id[doc_id])
+            for doc_id in unique_ids
+            if doc_id in docs_by_id
+        ]
+
     def run(
-        self, text: str | Document, top_k: Optional[int] = None, **kwargs
+        self,
+        text: str | Document,
+        top_k: Optional[int] = None,
+        scope: Sequence[str] | None = None,
+        fallback_scope: Sequence[str] | None = None,
+        trace: dict[str, Any] | None = None,
+        **kwargs,
     ) -> list[RetrievedDocument]:
         """Retrieve a list of documents from vector store
 
@@ -149,11 +246,42 @@ class VectorRetrieval(BaseRetrieval):
 
         do_extend = kwargs.pop("do_extend", False)
         thumbnail_count = kwargs.pop("thumbnail_count", 3)
+        legacy_doc_ids = kwargs.pop("doc_ids", None)
+        if scope is None and legacy_doc_ids is not None:
+            scope = legacy_doc_ids
+
+        # ``scope`` is the planner's exact chunk scope. ``fallback_scope`` is the
+        # caller-visible chunk allowlist. Even a global/ambiguous plan is restricted
+        # to that allowlist when one was provided.
+        requested_scope = self._normalize_ids(scope)
+        visible_scope = self._normalize_ids(fallback_scope)
+        if requested_scope is not None and visible_scope is not None:
+            visible_ids = set(visible_scope)
+            requested_scope = [
+                doc_id for doc_id in requested_scope if doc_id in visible_ids
+            ]
+        elif requested_scope is None:
+            requested_scope = visible_scope
+
+        if requested_scope == []:
+            self._trace_update(
+                trace,
+                scope_status="empty",
+                lexical_status="not_queried",
+                scope_fallback=False,
+            )
+            return []
 
         if do_extend:
             top_k_first_round = top_k * self.first_round_top_k_mult
         else:
             top_k_first_round = top_k
+
+        # Scoped calls need spare candidates so post-filtering remains effective
+        # when a backend ignores IDs or metadata filters.
+        candidate_k = top_k_first_round
+        if requested_scope is not None:
+            candidate_k = max(candidate_k, top_k * self.first_round_top_k_mult)
 
         if self.doc_store is None:
             raise ValueError(
@@ -161,81 +289,167 @@ class VectorRetrieval(BaseRetrieval):
                 "retrieve the documents"
             )
 
-        result: list[RetrievedDocument] = []
-        # TODO: should declare scope directly in the run params
-        scope = kwargs.pop("scope", None)
-        emb: list[float]
-
-        if self.retrieval_mode == "vector":
-            emb = self.embedding(text)[0].embedding
-            _, scores, ids = self.vector_store.query(
-                embedding=emb, top_k=top_k_first_round, doc_ids=scope, **kwargs
-            )
-            docs = self.doc_store.get(ids)
-            result = [
-                RetrievedDocument(**doc.to_dict(), score=score)
-                for doc, score in zip(docs, scores)
-            ]
-        elif self.retrieval_mode == "text":
-            query = text.text if isinstance(text, Document) else text
-            docs = []
-            if scope:
-                docs = self.doc_store.query(
-                    query, top_k=top_k_first_round, doc_ids=scope
+        query = text.text if isinstance(text, Document) else text
+        lexical_available = self._lexical_available(self.doc_store)
+        lexical_status = "not_used"
+        branch_errors: dict[str, Exception] = {}
+        query_embedding = None
+        if self.retrieval_mode in {"vector", "hybrid"}:
+            try:
+                query_embedding = self.embedding(text)[0].embedding
+            except Exception as exc:
+                self._trace_update(
+                    trace, branch_errors={"vector": f"{type(exc).__name__}: {exc}"}
                 )
-            result = [RetrievedDocument(**doc.to_dict(), score=-1.0) for doc in docs]
-        elif self.retrieval_mode == "hybrid":
-            # similarity search section
-            emb = self.embedding(text)[0].embedding
-            vs_docs: list[RetrievedDocument] = []
-            vs_ids: list[str] = []
-            vs_scores: list[float] = []
+                raise
+
+        def retrieve_candidates(
+            query_scope: list[str] | None,
+        ) -> tuple[list[RetrievedDocument], str, dict[str, Exception]]:
+            errors: dict[str, Exception] = {}
+            vector_docs: list[RetrievedDocument] = []
+            lexical_docs: list[RetrievedDocument] = []
+            status = "not_used"
+
+            if self.retrieval_mode == "vector":
+                try:
+                    vector_docs = self._vector_candidates(
+                        query_embedding, candidate_k, query_scope, kwargs
+                    )
+                except Exception as exc:
+                    errors["vector"] = exc
+                return (
+                    self._filter_to_scope(vector_docs, query_scope),
+                    status,
+                    errors,
+                )
+
+            if self.retrieval_mode == "text":
+                if not lexical_available:
+                    return [], "unavailable", errors
+                try:
+                    docs = self.doc_store.query(
+                        query, top_k=candidate_k, doc_ids=query_scope
+                    )
+                    lexical_docs = [
+                        RetrievedDocument(**doc.to_dict(), score=-1.0) for doc in docs
+                    ]
+                    status = "available" if lexical_docs else "empty"
+                except Exception as exc:
+                    errors["lexical"] = exc
+                    status = "error"
+                lexical_docs = self._filter_to_scope(lexical_docs, query_scope)
+                return self._deduplicate_docs(lexical_docs), status, errors
+
+            if self.retrieval_mode != "hybrid":
+                raise ValueError(f"Unknown retrieval mode: {self.retrieval_mode}")
+
+            if not lexical_available:
+                status = "unavailable"
 
             def query_vectorstore():
-                nonlocal vs_docs
-                nonlocal vs_scores
-                nonlocal vs_ids
-
-                assert self.doc_store is not None
-                _, vs_scores, vs_ids = self.vector_store.query(
-                    embedding=emb, top_k=top_k_first_round, doc_ids=scope, **kwargs
-                )
-                if vs_ids:
-                    vs_docs = self.doc_store.get(vs_ids)
-
-            # full-text search section
-            ds_docs: list[RetrievedDocument] = []
+                nonlocal vector_docs
+                try:
+                    vector_docs = self._vector_candidates(
+                        query_embedding, candidate_k, query_scope, kwargs
+                    )
+                except Exception as exc:
+                    errors["vector"] = exc
 
             def query_docstore():
-                nonlocal ds_docs
-
-                assert self.doc_store is not None
-                query = text.text if isinstance(text, Document) else text
-                if scope:
-                    ds_docs = self.doc_store.query(
-                        query, top_k=top_k_first_round, doc_ids=scope
+                nonlocal lexical_docs
+                nonlocal status
+                if not lexical_available:
+                    return
+                try:
+                    docs = self.doc_store.query(
+                        query, top_k=candidate_k, doc_ids=query_scope
                     )
+                    lexical_docs = [
+                        RetrievedDocument(**doc.to_dict(), score=-1.0) for doc in docs
+                    ]
+                    status = "available" if lexical_docs else "empty"
+                except Exception as exc:
+                    errors["lexical"] = exc
+                    status = "error"
 
-            vs_query_thread = threading.Thread(target=query_vectorstore)
-            ds_query_thread = threading.Thread(target=query_docstore)
+            vector_thread = threading.Thread(target=query_vectorstore)
+            vector_thread.start()
+            lexical_thread = None
+            if lexical_available:
+                lexical_thread = threading.Thread(target=query_docstore)
+                lexical_thread.start()
 
-            vs_query_thread.start()
-            ds_query_thread.start()
+            vector_thread.join()
+            if lexical_thread is not None:
+                lexical_thread.join()
 
-            vs_query_thread.join()
-            ds_query_thread.join()
+            lexical_docs = self._filter_to_scope(lexical_docs, query_scope)
+            vector_docs = self._filter_to_scope(vector_docs, query_scope)
+            merged = self._deduplicate_docs(lexical_docs + vector_docs)
+            return merged, status, errors
 
-            result = [
-                RetrievedDocument(**doc.to_dict(), score=-1.0)
-                for doc in ds_docs
-                if doc not in vs_ids
-            ]
-            result += [
-                RetrievedDocument(**doc.to_dict(), score=score)
-                for doc, score in zip(vs_docs, vs_scores)
-            ]
-            print(f"Got {len(vs_docs)} from vectorstore")
-            print(f"Got {len(ds_docs)} from docstore")
+        result, lexical_status, branch_errors = retrieve_candidates(requested_scope)
+        result = self._deduplicate_docs(self._filter_to_scope(result, requested_scope))
+
+        fallback_ids: list[str] | None = None
+        if visible_scope is not None:
+            fallback_ids = visible_scope
+        should_retry = (
+            scope is not None
+            and not result
+            and not branch_errors
+            and fallback_ids is not None
+            and bool(fallback_ids)
+            and set(requested_scope or ()) != set(fallback_ids)
+        )
+        self._trace_update(
+            trace,
+            scope_status="scoped" if requested_scope is not None else "global",
+            scope_ids=requested_scope,
+            candidate_k=candidate_k,
+            lexical_status=lexical_status,
+            lexical_result_count=sum(1 for item in result if item.score == -1.0),
+            scope_fallback=False,
+        )
+        if should_retry:
+            self._trace_update(
+                trace,
+                scope_fallback=True,
+                scope_fallback_reason="zero_scoped_hits",
+            )
+            result, lexical_status, branch_errors = retrieve_candidates(fallback_ids)
+            result = self._deduplicate_docs(self._filter_to_scope(result, fallback_ids))
+            requested_scope = fallback_ids
+            self._trace_update(
+                trace,
+                scope_status="fallback",
+                scope_ids=fallback_ids,
+                lexical_status=lexical_status,
+                lexical_result_count=sum(1 for item in result if item.score == -1.0),
+            )
+
+        if branch_errors:
+            error_summary = {
+                branch: f"{type(error).__name__}: {error}"
+                for branch, error in branch_errors.items()
+            }
+            self._trace_update(trace, branch_errors=error_summary)
+            if not result:
+                if self.retrieval_mode == "hybrid":
+                    details = "; ".join(
+                        f"{branch}: {message}"
+                        for branch, message in error_summary.items()
+                    )
+                    raise RuntimeError(
+                        f"retrieval branches failed: {details}"
+                    ) from next(iter(branch_errors.values()))
+                raise next(iter(branch_errors.values()))
+
+        if lexical_status == "unavailable":
+            self._trace_update(trace, lexical_status="unavailable")
+        elif lexical_status == "empty":
+            self._trace_update(trace, lexical_status="empty")
 
         # use additional reranker to re-order the document list
         if self.rerankers and text:
@@ -244,6 +458,9 @@ class VectorRetrieval(BaseRetrieval):
                 if isinstance(reranker, LLMReranking):
                     result = self._filter_docs(result, top_k=top_k)
                 result = reranker.run(documents=result, query=text)
+                result = self._deduplicate_docs(
+                    self._filter_to_scope(result, requested_scope)
+                )
 
         result = self._filter_docs(result, top_k=top_k)
         print(f"Got raw {len(result)} retrieved documents")
@@ -272,7 +489,9 @@ class VectorRetrieval(BaseRetrieval):
             else:
                 non_thumbnail_docs.append(doc)
 
-        linked_thumbnail_docs = self.doc_store.get(list(thumbnail_doc_ids))
+        linked_thumbnail_docs = (
+            self.doc_store.get(list(thumbnail_doc_ids)) if thumbnail_doc_ids else []
+        )
         print(
             "thumbnail docs",
             len(linked_thumbnail_docs),

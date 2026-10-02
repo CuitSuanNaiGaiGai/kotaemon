@@ -167,6 +167,8 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
             ],
             condition=FilterCondition.OR,
         )
+        if "trace" in kwargs:
+            retrieval_kwargs["trace"] = kwargs["trace"]
 
         if self.mmr:
             # TODO: double check that llama-index MMR works correctly
@@ -204,6 +206,7 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
                 extra_docs = self.vector_retrieval(
                     text="",
                     top_k=50,
+                    scope=chunk_ids,
                     where=queries[0] if len(queries) == 1 else {"$or": queries},
                 )
                 for doc in extra_docs:
