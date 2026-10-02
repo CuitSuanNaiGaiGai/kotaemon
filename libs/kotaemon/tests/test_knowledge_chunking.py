@@ -1,3 +1,5 @@
+import pytest
+
 from kotaemon.base import Document
 from kotaemon.indices.knowledge.chunking import get_chunk_strategy
 from kotaemon.indices.splitters import TokenSplitter
@@ -170,3 +172,30 @@ def test_custom_strategy_can_be_registered_for_multiple_source_types():
         strategy = get_chunk_strategy(source_type, splitter)
         assert isinstance(strategy, CustomStrategy)
         assert strategy.token_splitter is splitter
+
+
+@pytest.mark.parametrize(
+    "source_type, prefix", [("markdown", "# API\n\n"), ("faq", "Q: Owner?\nA: ")]
+)
+@pytest.mark.parametrize("chunk_size", [8, 1000])
+def test_semantic_chunks_preserve_metadata_exclusions(source_type, prefix, chunk_size):
+    document = Document(
+        text=prefix + "detail " * 80,
+        metadata={
+            "source_type": source_type,
+            "private_embed": "secret",
+            "private_llm": "hidden",
+        },
+        excluded_embed_metadata_keys=["private_embed"],
+        excluded_llm_metadata_keys=["private_llm"],
+    )
+    chunks = get_chunk_strategy(
+        source_type, TokenSplitter(chunk_size=chunk_size, chunk_overlap=0)
+    ).split(document)
+    assert len(chunks) > 1 if chunk_size == 8 else len(chunks) == 1
+    assert all(
+        chunk.excluded_embed_metadata_keys == ["private_embed"] for chunk in chunks
+    )
+    assert all(chunk.excluded_llm_metadata_keys == ["private_llm"] for chunk in chunks)
+    assert document.excluded_embed_metadata_keys == ["private_embed"]
+    assert document.excluded_llm_metadata_keys == ["private_llm"]

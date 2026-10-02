@@ -20,6 +20,8 @@ def semantic_unit(document: Document, text: str, section_path: list[str]) -> Doc
         metadata=normalize_knowledge_metadata(document),
         source=document.source,
         channel=document.channel,
+        excluded_embed_metadata_keys=list(document.excluded_embed_metadata_keys),
+        excluded_llm_metadata_keys=list(document.excluded_llm_metadata_keys),
     )
     unit.metadata.update(section_path=list(section_path), parent_id=unit.doc_id)
     return unit
