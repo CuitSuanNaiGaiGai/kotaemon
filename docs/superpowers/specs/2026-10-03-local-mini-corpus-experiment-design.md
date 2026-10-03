@@ -40,7 +40,7 @@ fixtures only. No source text, query text, gold labels, or private-corpus metric
 artifacts are added to tracked files or published in the existing PR without
 explicit authorization.
 
-## Golden v1
+## Fixed golden v1
 
 Select 20–24 unique documents from the parsed corpus, covering each usable file
 format and the substantive content topics found during extraction. Keep related
@@ -49,47 +49,89 @@ with the final count determined by evidence quality. Include explicit
 document/entity/path questions, content questions, cross-document questions,
 and ambiguous/global questions where the source material supports them.
 
-Use chunk-level judgments throughout v1 to preserve the metric unit used by the
-existing synthetic evaluation. Each question must cite local source path, page
-or sheet/section, supporting text location, and all reviewed relevant chunk IDs.
-Questions and labels must be created independently of planner outputs; gold
-answers and judgment IDs must not be included in indexed text or metadata. Set
-`disallowed_source_ids` only for sources that clearly violate an explicit scope;
-irrelevance alone is not wrong scope. Use no wrong-scope label for ambiguous or
-global questions. The current fixture schema rejects mixed judgment levels and
-requires at least one relevant ID, so do not mix source-level labels or encode
-zero-result cases in the judged v1 fixture.
+Freeze the semantic gold at the source level so it remains unchanged when a
+chunking arm produces different chunk boundaries and IDs. Every query records
+stable content-hash-based `source_id` values for relevant and, where an
+explicit scope is violated, disallowed sources. Preserve evidence anchors in
+`anchors.jsonl`: source SHA-256, page/sheet/section locator, normalized-text
+offsets, and a digest of the cited passage. Anchors establish that each source
+judgment has concrete evidence and allow each chunking arm to report whether its
+chunks cover that evidence; do not write arm-specific chunk IDs back into the
+frozen gold.
+
+Use the evaluator's `judgment_level="source"` for every v1 case. Score the
+first five distinct source IDs in the ranked chunk results, in first-occurrence
+order, so repeated chunks from one source do not consume multiple positions in
+source-level Hit@5, Recall@5, MRR@5, or Wrong-scope@5. Keep evidence-anchor
+coverage and same-source/wrong-passage diagnostics separate from the four main
+metrics. Questions and labels must be created independently of retrieval
+outputs; gold answers, evidence anchors, and judgment IDs must not be included
+in indexed text or metadata. Set `disallowed_source_ids` only for sources that
+clearly violate an explicit scope; irrelevance alone is not wrong scope. Use no
+wrong-scope label for ambiguous or global questions. The current fixture schema
+already supports source-level judgments and rejects mixed judgment levels.
 
 Before freezing v1, present the user a local-only review package containing the
 source-to-content-topic mapping, excluded/duplicate file list, extraction
 quality summary, chunk previews, and per-question evidence, relevant IDs, and
 wrong-scope IDs. Do not run or report gold-based metrics until the user approves
 the labels. Freeze approved files under `local/snapshots/v1/` with exact-byte
-SHA-256 hashes for `records.json` and `judgments.jsonl`, source hashes, schema
-and parser/chunker versions, counts, and review status/date.
+SHA-256 hashes for `records.json`, `judgments.jsonl`, and `anchors.jsonl`,
+source hashes, schema and parser/chunker versions, counts, and review
+status/date.
 
 For the later full-corpus snapshot, re-review relevance and scope labels against
 the added sources. In particular, update `disallowed_source_ids` where new
 sources clearly violate a query's explicit scope. Freeze it as a new version;
 never mutate v1.
 
-## Paired K=5 experiment
+## Fixed K=5 experiment matrix
 
-Load only an explicitly selected, hash-verified local snapshot. Reuse the
-existing `KnowledgeService`, `VectorRetrieval`, and paired evaluator path. Build
-one deterministic local hashed-feature embedding index and share the same
-immutable index, document store, records, judgments, and query order between
-both arms. Compare the identity/global baseline planner with `QueryPlanner`.
-Use K=5 and candidate_k=5; keep retrieval mode, embedding, seed, query,
-filters, and all other configuration fixed. Disable rerankers, query rewriting,
-MMR, and result extension so the planner is the only variable.
+Load only an explicitly selected, hash-verified local snapshot. Use the same
+reviewed query/source gold, evidence anchors, query order, filters, global
+identity planner, vector-only retrieval mode, random seed, and source metadata in
+all four arms. Keep K=5 and retrieve an M=20 candidate pool in every arm; record
+actual pool sizes. Disable query rewriting, MMR/result extension, and external
+services. This holds planning constant so the component experiments do not
+confound retrieval changes with planner behavior.
 
-Report Hit@5, Recall@5, MRR@5, and Wrong-scope@5 with baseline, planned, signed
-delta, query count, and wrong-scope denominator. Include per-query results and
-traces in ignored local artifacts. The deterministic hashed-feature backend
-matches the current offline harness and makes the planner comparison
-reproducible; it is a controlled retrieval proxy, not a claim about a configured
-production embedding model.
+Run these one-factor comparisons against one shared baseline. The baseline
+chunker reproduces the token-only behavior in the main-branch version recorded
+in the local snapshot manifest; the chunking arm uses this branch's registered
+source-aware strategy with the same splitter parameters.
+
+| Arm | Chunking | Embedding | Reranker |
+| --- | --- | --- | --- |
+| Baseline | pre-upgrade token splitter, 1,024/256 | deterministic hashed-feature offline baseline | none |
+| Chunking | registered source-aware strategy, same 1,024/256 splitter | unchanged baseline embedding | none |
+| Embedding | unchanged baseline chunking | `BAAI/bge-m3` dense embeddings | none |
+| Reranker | unchanged baseline chunking | unchanged baseline embedding | `BAAI/bge-reranker-v2-m3` |
+
+The hashed-feature baseline is a reproducible offline control, not a claim about
+the user's current production embedding. Implement both model arms with local
+inference only. Persist model identifiers and resolved revisions, model-file
+hashes, runtime/library versions, tokenization and truncation parameters, and
+whether model weights were cached or downloaded. Do not send source text or
+queries to a remote service. Require the local models to be available before
+running those arms; do not silently substitute a different model.
+
+For the reranker comparison, assert that each query's reranker receives exactly
+the same ordered 20 baseline candidates that the no-reranker arm retrieves. If
+fewer than 20 candidates exist, retain the query and record the actual count.
+After ranking, map results to first-occurrence source IDs and score the first
+five distinct sources. Do not silently drop queries or tune model/chunk settings
+against the frozen evaluation gold.
+
+Report macro Hit@5, Recall@5, and MRR@5 across all judged queries. Compute
+Wrong-scope@5 as the pooled count of disallowed distinct sources divided by the
+number of distinct source results in the first-five window for queries with an
+explicit wrong-scope label; report its numerator/denominator and show it as
+undefined when the denominator is zero. For every arm, include its metric value,
+baseline value, signed delta, query count, and source-level judgment unit. Also
+report evidence-anchor coverage and pre-rerank candidate counts as diagnostics.
+Include per-query results, run manifests, and traces in ignored local artifacts.
+The existing synthetic planner comparison remains a separate experiment; it is
+not mixed into these three retrieval component comparisons.
 
 ## Implementation and verification tasks
 
@@ -99,12 +141,15 @@ production embedding model.
 2. Add a snapshot loader/validator that requires a reviewed manifest, verifies
    exact payload hashes, checks all IDs/relationships, and accepts an explicit
    snapshot path without changing the synthetic default.
-3. Add an offline paired K=5 runner using the existing retrieval service and
-   deterministic vector adapter. Tests must prove both arms share the same
-   index/configuration and differ only by planner.
+3. Add and test an offline experiment runner that supports the fixed
+   source-level gold and the one-factor chunking/embedding/reranker arms. Tests
+   must prove source-level rank deduplication, K=5/M=20 handling, stable-gold
+   validation, reranker candidate identity, and configuration parity within
+   each comparison.
 4. Generate and present the local-only v1 review package. After user approval,
-   freeze v1 and run the paired experiment. Repeat for the expanded snapshot
-   only after its labels are reviewed.
+   freeze v1 and run the four-arm experiment, using only explicitly selected
+   local models. Repeat for the expanded snapshot only after its labels are
+   reviewed.
 
 ## Acceptance criteria
 
@@ -115,9 +160,11 @@ production embedding model.
   are surfaced rather than silently omitted.
 - Snapshot hash mismatch, missing review status, unknown IDs, or invalid source
   relations fail before retrieval.
-- The v1 fixture has one judgment level, reviewed evidence for every relevant
-  chunk, and only explicit wrong-scope labels.
-- The paired report shows configuration parity except for planner and reports
-  all four requested K=5 metrics with denominators and signed deltas.
+- The v1 fixture has one source-level judgment level, evidence anchors for
+  every relevant source, and only explicit wrong-scope labels.
+- Every report arm uses the same approved gold and query order and reports the
+  four K=5 source-level metrics with denominators and signed deltas.
+- The chunking arm records evidence-anchor coverage; the reranker arm proves
+  candidate identity with the no-reranker baseline.
 - Private source-derived data and results remain local unless the user later
   explicitly approves publication.

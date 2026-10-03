@@ -26,52 +26,55 @@ local/
 │       └── <original-filename>
 ├── draft/
 │   ├── records.json
-│   └── judgments.jsonl
+│   ├── judgments.jsonl
+│   └── anchors.jsonl
 └── snapshots/
 ```
 
-Write candidate extracted records and judgments to the ignored files
-`libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/records.json` and
-`libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/judgments.jsonl`.
-These are working files for preparation and review, not runner inputs.
+Write candidate extracted records, source-level judgments, and independent
+evidence anchors to the ignored files in `local/draft/`. The judgment file uses
+stable source IDs so its labels remain unchanged across chunking arms. Anchor
+records identify source hashes and page, sheet, or section locations plus
+normalized-text offsets and an evidence digest. Do not put per-arm chunk IDs in
+the frozen gold. These files are working data for preparation and review, not
+runner inputs.
 
 ## Review and fixed snapshots
 
-Before freezing a snapshot, have a person review the source text, extracted
-text and chunk boundaries, source/chunk IDs, evaluation queries, relevant IDs,
-and disallowed IDs. After review, copy the approved data into a versioned
-snapshot:
+Before freezing a snapshot, have a person review the content-derived source
+topics, extracted text and chunk boundaries, source IDs, evidence anchors,
+evaluation queries, relevant source IDs, and disallowed source IDs. After
+review, copy the approved data into a versioned snapshot:
 
 ```text
 local/snapshots/<version>/
 ├── records.json
 ├── judgments.jsonl
+├── anchors.jsonl
 └── manifest.json
 ```
 
-The manifest should record the records/judgments schema versions and snapshot
-version; each original source file's repository-relative path (for example,
+The manifest should record the records/judgments/anchors schema versions and
+snapshot version; each original source file's repository-relative path (for example,
 `libs/kotaemon/tests/fixtures/knowledge_eval/local/sources/<source-id>/<filename>`)
-and SHA-256; the SHA-256 of the exact bytes of the frozen `records.json` and
-`judgments.jsonl` payloads; loader and chunker names, versions, and relevant
-configuration; document, chunk, and query counts; and review status and date.
-Record the two snapshot payload hashes in a `payload_sha256` mapping keyed by
-filename. Use repository-relative paths rather than machine-specific absolute
-paths.
+and SHA-256; the SHA-256 of the exact bytes of the frozen `records.json`,
+`judgments.jsonl`, and `anchors.jsonl` payloads; loader and chunker names,
+versions, and relevant configuration; document, chunk, and query counts; and
+review status and date. Record the three snapshot payload hashes in a
+`payload_sha256` mapping keyed by filename. Use repository-relative paths rather
+than machine-specific absolute paths.
 
-Before evaluating a snapshot, recompute the hashes for `records.json` and
-`judgments.jsonl` and compare them with the corresponding manifest entries.
-Do not evaluate the snapshot if either hash is missing or mismatched. A
+Before evaluating a snapshot, recompute the hashes for all three payload files
+and compare them with the corresponding manifest entries. Do not evaluate the
+snapshot if a hash is missing or mismatched. A
 reviewed snapshot is immutable: any change to its payloads, manifest, or
 documented source/loader/chunker inputs must be published under a new
 `local/snapshots/<version>/` directory with an updated manifest; do not
 overwrite an existing version. When explicit snapshot-path selection is added
 to the runner, it must perform this hash check before evaluation.
 
-The current runner will not load a local draft or snapshot. Once source
-materials are supplied and a snapshot is reviewed, add explicit snapshot-path
-selection in a separate change. That change should preserve the synthetic
-root-level fixture as the default and enforce the snapshot hash check described
+The synthetic fixture remains the runner's default. Local experiment runs must
+explicitly select a reviewed snapshot path and enforce the hash check described
 above.
 
 ## Local-data handling
