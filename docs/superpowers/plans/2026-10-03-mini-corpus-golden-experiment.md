@@ -282,11 +282,13 @@ Expected: FAIL because `run_local_experiment` is not implemented.
 
 **Interfaces:**
 - CLI commands: `inventory`, `prepare-review`, `freeze`, `download-models`, and `run`; `run` accepts only a reviewed snapshot and explicit local model paths.
-- The v1 review package contains source/topic mapping, duplicates/exclusions, extraction quality, chunk previews, questions, evidence anchors, relevant source IDs, and explicit disallowed source IDs. It contains no metric values until approval.
+- The v1 review package contains source/topic candidates, duplicates/exclusions, extraction quality, and chunk previews. Questions, judgments, scope labels, and evidence anchors start empty for a person to author and review; the CLI must never invent them.
 - `freeze` requires both `--approved-by` and `--approved-at`; `run` requires `--embedding-model-dir` and `--reranker-model-dir`.
 - All CLI outputs must resolve beneath the selected `local/` root: drafts under `draft/`, snapshots under `snapshots/`, downloaded weights under `models/`, and results under `runs/`.
 
-- [ ] **Step 1: Add CLI tests** for the synthetic generated local corpus: no source mutation, no writes outside the chosen ignored directory, deterministic review-package outputs, `freeze` rejection until approved, and `run` rejection for a draft snapshot.
+**Implementation checkpoint:** The CLI, synthetic tests, and README are implemented. Default `v1` preparation proposes 20–24 usable unique documents by file format and content-derived topic candidates, without using directory names, and lists omitted candidate source/topic pairs as unreviewed coverage gaps. Explicit `--sample-id` selections are checked against the full parse for at least 20 usable chunk-backed documents and coverage of every format with usable documents; rejection errors retain selected extraction diagnostics, and review text lists only formats actually selected. `--all-sources` is available only for non-v1 drafts. In-checkout local roots must be Git-ignored. The schema-v2 model manifest hashes the full regular asset set, and `run` verifies exact filenames and hashes, performs the offline inference preflight before model construction, and publishes the verified manifest with the run artifact bundle. Task 7 is awaiting independent GPT-6 Sol Medium re-review; no approval is claimed. Do not prepare a real-source draft until independent CLI review. After review, `prepare-review` creates the pre-approval package for manual inspection; freezing gold, downloading/loading models, and running private-corpus metrics remain gated on the user's explicit approval of the labels.
+
+- [x] **Step 1: Add CLI tests** for the synthetic generated local corpus: no source mutation, no writes outside the chosen ignored directory, deterministic review-package outputs, approval-sidecar validation, model-manifest tampering and ambiguity, `freeze` approval gating, and `run` rejection for a draft snapshot.
 
 The CLI test module defines `make_draft_snapshot(tmp_path)` by writing a generated draft manifest with `review_status="draft"` and the exact payload hashes. It also creates a temporary `local/` tree so output containment is tested without writing into the repository.
 
@@ -299,27 +301,27 @@ def test_run_refuses_a_draft_snapshot(tmp_path):
     assert "approved snapshot" in result.output.lower()
 ```
 
-- [ ] **Step 2: Run the focused CLI test** and confirm commands fail because the CLI is absent.
+- [x] **Step 2: Run the focused CLI test** and confirm commands fail because the CLI is absent.
 
 Run: `uv run pytest libs/kotaemon/tests/test_knowledge_eval_local_cli.py -q`
 
 Expected: FAIL because the CLI is not implemented.
 
-- [ ] **Step 3: Implement CLI wrappers over the tested inventory, parser, snapshot, and experiment modules.** Generate the v1 draft from 20–24 content-stratified unique documents under `local/draft/`; manually inspect and correct content-derived topics and produce 20–30 candidate questions with evidence anchors and source-level labels. Do not use directory labels as topic truth.
+- [x] **Step 3: Implement CLI wrappers over the tested inventory, parser, snapshot, and experiment modules.** The v1 selector proposes 20–24 usable unique documents by file format and content-derived topic candidates. It labels those candidates unreviewed and does not create questions or gold labels. Do not use directory labels as topic truth.
 
 ```bash
-uv run python -m kotaemon.indices.knowledge.evaluation.local_cli prepare-review --source-root libs/kotaemon/tests/fixtures/knowledge_eval/local/sources --output-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v1
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli prepare-review --source-root libs/kotaemon/tests/fixtures/knowledge_eval/local/sources --source-root-label libs/kotaemon/tests/fixtures/knowledge_eval/local/sources --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local --version v1
 ```
 
-- [ ] **Step 4: Run all focused knowledge-evaluation tests** and inspect `git status` to confirm no source document or ignored local artifact is staged.
-- [ ] **Step 5: Request GPT-6 Sol Medium review, resolve findings, and commit only code/docs/tests** as `feat: prepare local golden review package`.
-- [ ] **Step 6: Present the review package to the user.** Stop before freezing v1 or computing metrics. After the user approves the labels, freeze v1, download/load the pinned local model revisions, run the four arms, independently recompute the four metrics from per-query output, and report signed deltas and denominators.
+- [x] **Step 4: Run the Task 7 synthetic verification suite** and inspect `git status`; 32 focused CLI tests and 167 tests across the seven local-evaluation modules pass, with no real source documents or ignored local artifacts created.
+- [x] **Step 5: Request GPT-6 Sol Medium review and resolve findings.** Sol Medium approved after the explicit-sample validation, offline command, and review-wording fixes; code/docs/tests are ready for the root agent to commit and update in the existing PR.
+- [ ] **Step 6: After independent code review, prepare and present the real local-only v1 review package.** Manually inspect candidate labels and author questions, source-level judgments, scope labels, and evidence anchors. Stop before freezing or computing metrics until the user approves those labels.
 
 ```bash
-uv run python -m kotaemon.indices.knowledge.evaluation.local_cli freeze --snapshot libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v1 --approved-by user --approved-at 2026-10-03
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli freeze --draft-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v1 --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local --approved-by user --approved-at 2026-10-03
 uv sync --package kotaemon --extra local-eval
-uv run python -m kotaemon.indices.knowledge.evaluation.local_cli download-models --output-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models
-uv run python -m kotaemon.indices.knowledge.evaluation.local_cli run --snapshot libs/kotaemon/tests/fixtures/knowledge_eval/local/snapshots/v1 --embedding-model-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models/bge-m3 --reranker-model-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models/bge-reranker-v2-m3
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli download-models --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local
+env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run python -m kotaemon.indices.knowledge.evaluation.local_cli run --snapshot libs/kotaemon/tests/fixtures/knowledge_eval/local/snapshots/v1 --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local --embedding-model-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models/bge-m3 --reranker-model-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models/bge-reranker-v2-m3
 ```
 
 ## Plan Self-Review

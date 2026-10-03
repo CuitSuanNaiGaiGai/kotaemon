@@ -49,35 +49,83 @@ local/
 │   └── <source-id>/
 │       └── <original-filename>
 ├── draft/
-│   ├── records.json
-│   ├── judgments.jsonl
-│   └── anchors.jsonl
-└── snapshots/
+│   ├── inventory.json
+│   └── v1/
+│       ├── records.json
+│       ├── judgments.jsonl
+│       ├── anchors.jsonl
+│       ├── manifest.json
+│       └── REVIEW.md
+├── snapshots/
+├── models/
+└── runs/
 ```
 
-Write candidate extracted records, source-level judgments, and independent
-evidence anchors to the ignored files in `local/draft/`. The judgment file uses
-stable source IDs so its labels remain unchanged across chunking arms. Anchor
-records identify query IDs, source hashes, and page, sheet, or section locations
-plus normalized-text offsets and an evidence digest. Require at least one anchor
-for each relevant query/source pair. Do not put per-arm chunk IDs in
-the frozen gold. These files are working data for preparation and review, not
-runner inputs.
+Run the local CLI from the repository root. Every generated path is resolved
+under the selected `--local-root`, and command outputs are limited to its
+`draft/`, `snapshots/`, `models/`, or `runs/` subdirectories. Symlink redirects
+are rejected. A root inside the checkout must already be Git-ignored; temporary
+roots outside the checkout are allowed.
+
+```bash
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli inventory \
+  --source-root libs/kotaemon/tests/fixtures/knowledge_eval/local/sources \
+  --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local
+
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli prepare-review \
+  --source-root libs/kotaemon/tests/fixtures/knowledge_eval/local/sources \
+  --source-root-label libs/kotaemon/tests/fixtures/knowledge_eval/local/sources \
+  --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local \
+  --version v1
+```
+
+The default `v1` preparation deterministically proposes 20–24 usable unique
+documents. It covers supported file formats first, then content-derived topic
+heading candidates, and fills remaining slots by stable source ID. It fails if
+fewer than 20 usable documents are available. This selection is only a review
+candidate: every topic candidate is marked unreviewed, and physical directory
+names are retained only as provenance. Topic candidates omitted by the 24-source
+cap are listed in `REVIEW.md` as unreviewed coverage gaps with their source IDs
+and provenance paths. With explicit `--sample-id` selection, outside candidates
+are labeled as not selected for that sample instead of as cap omissions.
+`REVIEW.md` lists only the usable formats actually present in the selected
+sample. `--sample-id` can select 20–24 explicit source IDs for
+`v1`; the CLI parses the corpus and rejects the selection unless it yields at
+least 20 chunk-backed unique documents and covers each format that is usable in
+the corpus. The rejection lists unusable selected paths with their extraction
+diagnostics. Use `--all-sources` with a non-v1 version for a small synthetic
+review draft or a separate full-corpus review.
+
+`prepare-review` creates chunk previews and extraction-quality summaries, but
+does not make questions, relevance judgments, disallowed-source labels, or
+query-linked anchors. The initial `judgments.jsonl` and `anchors.jsonl` are
+empty by design. A person must author and review those files against the
+source content before freezing. Source-level judgments use stable source IDs;
+anchors identify query IDs, source hashes, and page, sheet, or section locations
+plus normalized-text offsets and an evidence digest. Require at least one
+anchor for every relevant query/source pair. Do not put per-arm chunk IDs in
+the frozen gold.
 
 ## Review and fixed snapshots
 
 Before freezing a snapshot, have a person review the content-derived source
 topics, extracted text and chunk boundaries, source IDs, evidence anchors,
-evaluation queries, relevant source IDs, and disallowed source IDs. After
-review, copy the approved data into a versioned snapshot:
+evaluation queries, relevant source IDs, and disallowed source IDs. Freeze a
+completed draft with explicit approval identity and date:
 
-```text
-local/snapshots/<version>/
-├── records.json
-├── judgments.jsonl
-├── anchors.jsonl
-└── manifest.json
+```bash
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli freeze \
+  --draft-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v1 \
+  --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local \
+  --approved-by 'reviewer' \
+  --approved-at 2026-10-04
 ```
+
+The command validates the completed labels and anchors, refuses to overwrite an
+existing version, and writes an `approval.json` sidecar containing the approver,
+date, and SHA-256 of the exact snapshot manifest bytes. The frozen data lives in
+`local/snapshots/<version>/`; the version 1 `manifest.json` schema remains
+unchanged.
 
 ### Snapshot schema version 1
 
@@ -170,6 +218,50 @@ otherwise valid draft snapshot.
 The synthetic fixture remains the runner's default. Local experiment runs must
 explicitly select a reviewed snapshot path and enforce the hash check described
 above.
+
+## Local model manifest and run command
+
+`download-models` first checks the Hugging Face cache in offline mode for each
+fixed model ID. A cache hit is recorded as `cached`; only a miss triggers
+revision resolution and download pinned to the resolved full commit SHA. The
+command writes model copies beneath `local/models/` and publishes
+`model-manifest.json` atomically after both model directories are complete.
+The manifest records exact IDs (`BAAI/bge-m3` and
+`BAAI/bge-reranker-v2-m3`), revisions, relative directories, sorted
+weight-filename SHA-256 maps, a sorted SHA-256 map for every regular inference
+asset, and `cached`/`downloaded` origin labels. The asset map includes
+configuration, tokenizer, vocabulary, special-token, weight, and any other
+regular model files. It excludes only Hugging Face download bookkeeping beneath
+`.cache/huggingface/`. At run time the CLI checks the exact asset filenames and
+hashes, so added, missing, or changed assets fail before model creation.
+
+```bash
+uv run python -m kotaemon.indices.knowledge.evaluation.local_cli download-models \
+  --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local
+```
+
+`run` accepts only an approved snapshot under `local/snapshots/`, explicit
+model directories that match the single unambiguous model manifest, and all
+model assets whose filenames and hashes still match that manifest. It also
+requires the approval sidecar and checks that its approver/date and manifest
+hash match. Before creating model instances or run artifacts, the CLI checks
+the offline environment and Hub session. It copies the verified model manifest
+into `local/runs/<snapshot-name>/model-manifest.json` and records its SHA-256 and
+byte size in `artifact-manifest.json`. Run publication is atomic.
+
+Start `run` in a fresh shell process with both offline flags set before Python
+starts, for example:
+
+```bash
+env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run python -m kotaemon.indices.knowledge.evaluation.local_cli run \
+  --snapshot libs/kotaemon/tests/fixtures/knowledge_eval/local/snapshots/v1 \
+  --local-root libs/kotaemon/tests/fixtures/knowledge_eval/local \
+  --embedding-model-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models/bge-m3 \
+  --reranker-model-dir libs/kotaemon/tests/fixtures/knowledge_eval/local/models/bge-reranker-v2-m3
+```
+
+Do not freeze labels or run an experiment until the user has reviewed and
+approved the candidate questions, judgments, scope labels, and evidence anchors.
 
 ## Local-data handling
 
