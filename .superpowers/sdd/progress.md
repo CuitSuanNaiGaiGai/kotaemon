@@ -13,4 +13,4 @@ Task 10: complete (implementation/review-fix commits `94dcbd52` and `ae7d27ce`; 
 Task 11: implementation committed for GPT-6 Sol Medium final review (`6361601f999baaf4bb6ff8b74a74a4a444714577`; 110 affected tests pass; pure evaluator 18 pass; Black/flake8/isort/diff checks pass)
 Task 12: complete (commit `9a1ce549bb416c2fe4407d669b115d33fda29b6b`; GPT-6 Sol Medium review passed; isolated extra-table trace summaries)
 Task 13: complete (commit `088b4cd6108c51625f05f5c47a3bd455804bcf4e`; GPT-6 Sol Medium review passed; K=5 evaluation and preserved K=2 artifacts)
-Task 14: review fix committed and awaiting re-review (manifest now covers frozen records/judgments payload hashes, pre-evaluation verification, and immutable versioning; docs-only; pytest not run)
+Task 14: complete (commits `9dee88cc` and `d1dd9b3d`; GPT-6 Sol Medium re-review approved; local corpus drop zone and immutable snapshot hash contract; ignore/diff checks pass; docs-only; pytest not run)
