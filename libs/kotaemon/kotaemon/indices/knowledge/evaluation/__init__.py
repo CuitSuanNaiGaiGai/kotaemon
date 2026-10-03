@@ -15,6 +15,7 @@ from .retrieval_eval import (
     score_case,
     score_run,
 )
+from .local_corpus import SourceFile, scan_sources
 
 __all__ = [
     "CaseObservation",
@@ -25,8 +26,10 @@ __all__ = [
     "QueryMetrics",
     "ResolvedCase",
     "RunMetrics",
+    "SourceFile",
     "compare_runs",
     "load_fixture",
+    "scan_sources",
     "resolve_judgments",
     "score_case",
     "score_run",
