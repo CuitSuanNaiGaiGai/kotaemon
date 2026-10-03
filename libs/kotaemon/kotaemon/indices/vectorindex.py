@@ -21,6 +21,7 @@ from kotaemon.storages import BaseDocumentStore, BaseVectorStore
 
 from .base import BaseIndexing, BaseRetrieval
 from .knowledge.retrieval.diversity import select_diverse_documents
+from .knowledge.retrieval.trace import trace_event, trace_update
 from .rankings import BaseReranking, LLMReranking
 
 VECTOR_STORE_FNAME = "vectorstore"
@@ -296,13 +297,50 @@ class VectorRetrieval(BaseRetrieval):
         return callable(query_method) and query_method is not BaseDocumentStore.query
 
     @staticmethod
-    def _trace_update(trace: dict[str, Any] | None, **fields):
-        if trace is None:
-            return
-        try:
-            trace.update(fields)
-        except Exception:
-            logger.exception("Could not update optional retrieval trace")
+    def _trace_update(trace: Any | None, **fields):
+        trace_update(trace, **fields)
+
+    @staticmethod
+    def _trace_event(trace: Any | None, stage: str, **fields):
+        trace_event(trace, stage, **fields)
+
+    @staticmethod
+    def _candidate_trace_records(
+        documents: list[RetrievedDocument],
+        *,
+        branch: str,
+        score_availability: Mapping[str, bool] | None = None,
+    ) -> list[dict[str, Any]]:
+        candidates = []
+        for document in documents:
+            doc_id = document.doc_id
+            if branch == "vector":
+                available = (
+                    doc_id is not None
+                    and score_availability is not None
+                    and score_availability.get(doc_id, False)
+                )
+            elif branch == "reranker":
+                # The legacy lexical branch stores -1.0 as a missing-score
+                # sentinel. Other reranker output scores are real at this point.
+                try:
+                    document_score = getattr(document, "score", None)
+                    available = (
+                        document_score is not None and float(document_score) != -1.0
+                    )
+                except (TypeError, ValueError):
+                    available = False
+            else:
+                available = False
+            score = getattr(document, "score", None) if available else None
+            candidates.append(
+                {
+                    "id": doc_id,
+                    "score": score,
+                    "score_available": bool(available),
+                }
+            )
+        return candidates
 
     def _vector_candidates(
         self,
@@ -310,6 +348,7 @@ class VectorRetrieval(BaseRetrieval):
         candidate_k: int,
         scope: list[str] | None,
         query_kwargs: dict[str, Any],
+        score_availability: dict[str, bool] | None = None,
     ) -> list[RetrievedDocument]:
         assert self.doc_store is not None
         _, scores, ids = self.vector_store.query(
@@ -332,6 +371,10 @@ class VectorRetrieval(BaseRetrieval):
             seen.add(doc_id)
             unique_ids.append(doc_id)
             score_by_id[doc_id] = scores[index] if index < len(scores) else -1.0
+            if score_availability is not None:
+                score_availability[doc_id] = (
+                    index < len(scores) and scores[index] is not None
+                )
 
         if not unique_ids:
             return []
@@ -349,7 +392,7 @@ class VectorRetrieval(BaseRetrieval):
         top_k: Optional[int] = None,
         scope: Sequence[str] | None = None,
         fallback_scope: Sequence[str] | None = None,
-        trace: dict[str, Any] | None = None,
+        trace: Any | None = None,
         **kwargs,
     ) -> list[RetrievedDocument]:
         """Retrieve a list of documents from vector store
@@ -398,6 +441,7 @@ class VectorRetrieval(BaseRetrieval):
                 lexical_status="not_queried",
                 scope_fallback=False,
             )
+            self._trace_event(trace, "no_search", reason="empty_scope", scope_ids=[])
             return []
 
         if do_extend:
@@ -418,6 +462,7 @@ class VectorRetrieval(BaseRetrieval):
             )
 
         query = text.text if isinstance(text, Document) else text
+        self._trace_event(trace, "retrieval_query", semantic_query=query)
         lexical_available = self._lexical_available(self.doc_store)
         lexical_status = "not_used"
         branch_errors: dict[str, Exception] = {}
@@ -429,36 +474,120 @@ class VectorRetrieval(BaseRetrieval):
                 self._trace_update(
                     trace, branch_errors={"vector": f"{type(exc).__name__}: {exc}"}
                 )
+                self._trace_event(
+                    trace,
+                    "backend_error",
+                    branch="vector_embedding",
+                    error_type=type(exc).__name__,
+                )
                 raise
+
+        attempt_number = 0
+
+        def record_recall_attempt(
+            query_scope,
+            vector_docs,
+            lexical_docs,
+            lexical_status,
+            vector_status,
+            errors,
+            score_availability,
+        ):
+            nonlocal attempt_number
+            if trace is None:
+                return
+            attempt_number += 1
+            self._trace_event(
+                trace,
+                "recall_attempt",
+                attempt=attempt_number,
+                scope_ids=query_scope,
+                vector_status=vector_status,
+                lexical_status=lexical_status,
+                vector_candidates=self._candidate_trace_records(
+                    vector_docs,
+                    branch="vector",
+                    score_availability=score_availability,
+                ),
+                lexical_candidates=self._candidate_trace_records(
+                    lexical_docs, branch="lexical"
+                ),
+                backend_errors={
+                    branch: {"type": type(error).__name__}
+                    for branch, error in errors.items()
+                },
+            )
 
         def retrieve_candidates(
             query_scope: list[str] | None,
-        ) -> tuple[list[RetrievedDocument], str, dict[str, Exception], int]:
+        ) -> tuple[
+            list[RetrievedDocument],
+            str,
+            dict[str, Exception],
+            int,
+            list[RetrievedDocument],
+            list[RetrievedDocument],
+            str,
+        ]:
             errors: dict[str, Exception] = {}
             vector_docs: list[RetrievedDocument] = []
             lexical_docs: list[RetrievedDocument] = []
             status = "not_used"
+            vector_status = "not_used"
+            vector_score_availability: dict[str, bool] | None = (
+                {} if trace is not None else None
+            )
 
             if self.retrieval_mode == "vector":
                 try:
                     vector_docs = self._vector_candidates(
-                        query_embedding, candidate_k, query_scope, kwargs
+                        query_embedding,
+                        candidate_k,
+                        query_scope,
+                        kwargs,
+                        score_availability=vector_score_availability,
                     )
                 except Exception as exc:
                     errors["vector"] = exc
+                vector_docs = self._filter_to_metadata(
+                    self._filter_to_scope(vector_docs, query_scope), metadata_filter
+                )
+                vector_status = (
+                    "error"
+                    if "vector" in errors
+                    else ("available" if vector_docs else "empty")
+                )
+                record_recall_attempt(
+                    query_scope,
+                    vector_docs,
+                    [],
+                    status,
+                    vector_status,
+                    errors,
+                    vector_score_availability,
+                )
                 return (
-                    self._filter_to_metadata(
-                        self._filter_to_scope(vector_docs, query_scope),
-                        metadata_filter,
-                    ),
+                    vector_docs,
                     status,
                     errors,
                     0,
+                    vector_docs,
+                    [],
+                    vector_status,
                 )
 
             if self.retrieval_mode == "text":
                 if not lexical_available:
-                    return [], "unavailable", errors, 0
+                    record_recall_attempt(
+                        query_scope,
+                        [],
+                        [],
+                        "unavailable",
+                        "not_used",
+                        errors,
+                        vector_score_availability,
+                    )
+                    return [], "unavailable", errors, 0, [], [], "not_used"
                 try:
                     docs = self.doc_store.query(
                         query, top_k=candidate_k, doc_ids=query_scope
@@ -474,7 +603,24 @@ class VectorRetrieval(BaseRetrieval):
                 if status != "error":
                     status = "available" if lexical_docs else "empty"
                 lexical_docs = self._deduplicate_docs(lexical_docs)
-                return lexical_docs, status, errors, len(lexical_docs)
+                record_recall_attempt(
+                    query_scope,
+                    [],
+                    lexical_docs,
+                    status,
+                    "not_used",
+                    errors,
+                    vector_score_availability,
+                )
+                return (
+                    lexical_docs,
+                    status,
+                    errors,
+                    len(lexical_docs),
+                    [],
+                    lexical_docs,
+                    "not_used",
+                )
 
             if self.retrieval_mode != "hybrid":
                 raise ValueError(f"Unknown retrieval mode: {self.retrieval_mode}")
@@ -486,7 +632,11 @@ class VectorRetrieval(BaseRetrieval):
                 nonlocal vector_docs
                 try:
                     vector_docs = self._vector_candidates(
-                        query_embedding, candidate_k, query_scope, kwargs
+                        query_embedding,
+                        candidate_k,
+                        query_scope,
+                        kwargs,
+                        score_availability=vector_score_availability,
                     )
                 except Exception as exc:
                     errors["vector"] = exc
@@ -524,12 +674,40 @@ class VectorRetrieval(BaseRetrieval):
                 status = "available" if lexical_docs else "empty"
             vector_docs = self._filter_to_scope(vector_docs, query_scope)
             vector_docs = self._filter_to_metadata(vector_docs, metadata_filter)
+            vector_status = (
+                "error"
+                if "vector" in errors
+                else ("available" if vector_docs else "empty")
+            )
             merged = self._deduplicate_docs(lexical_docs + vector_docs)
-            return merged, status, errors, len(lexical_docs)
+            record_recall_attempt(
+                query_scope,
+                vector_docs,
+                lexical_docs,
+                status,
+                vector_status,
+                errors,
+                vector_score_availability,
+            )
+            return (
+                merged,
+                status,
+                errors,
+                len(lexical_docs),
+                vector_docs,
+                lexical_docs,
+                vector_status,
+            )
 
-        result, lexical_status, branch_errors, lexical_result_count = (
-            retrieve_candidates(requested_scope)
-        )
+        (
+            result,
+            lexical_status,
+            branch_errors,
+            lexical_result_count,
+            vector_candidates,
+            lexical_candidates,
+            vector_status,
+        ) = retrieve_candidates(requested_scope)
         result = self._deduplicate_docs(self._filter_to_scope(result, requested_scope))
         result = self._filter_to_metadata(result, metadata_filter)
 
@@ -560,9 +738,21 @@ class VectorRetrieval(BaseRetrieval):
                 scope_fallback=True,
                 scope_fallback_reason="zero_scoped_hits",
             )
-            result, lexical_status, branch_errors, lexical_result_count = (
-                retrieve_candidates(fallback_ids)
+            self._trace_event(
+                trace,
+                "scope_fallback",
+                reason="zero_scoped_hits",
+                fallback_scope_ids=fallback_ids,
             )
+            (
+                result,
+                lexical_status,
+                branch_errors,
+                lexical_result_count,
+                vector_candidates,
+                lexical_candidates,
+                vector_status,
+            ) = retrieve_candidates(fallback_ids)
             result = self._deduplicate_docs(self._filter_to_scope(result, fallback_ids))
             result = self._filter_to_metadata(result, metadata_filter)
             requested_scope = fallback_ids
@@ -580,6 +770,14 @@ class VectorRetrieval(BaseRetrieval):
                 for branch, error in branch_errors.items()
             }
             self._trace_update(trace, branch_errors=error_summary)
+            self._trace_event(
+                trace,
+                "backend_error",
+                errors={
+                    branch: {"type": type(error).__name__}
+                    for branch, error in branch_errors.items()
+                },
+            )
             if not result:
                 if self.retrieval_mode == "hybrid":
                     details = "; ".join(
@@ -596,6 +794,9 @@ class VectorRetrieval(BaseRetrieval):
         elif lexical_status == "empty":
             self._trace_update(trace, lexical_status="empty")
 
+        if trace is not None:
+            self._trace_event(trace, "merged", ids=[doc.doc_id for doc in result])
+
         # use additional reranker to re-order the document list
         if self.rerankers and text:
             for reranker in self.rerankers:
@@ -607,16 +808,44 @@ class VectorRetrieval(BaseRetrieval):
                     self._filter_to_scope(result, requested_scope)
                 )
                 result = self._filter_to_metadata(result, metadata_filter)
+                reranker_name = getattr(
+                    reranker,
+                    "name",
+                    type(reranker).__name__,
+                )
+                if trace is not None:
+                    self._trace_event(
+                        trace,
+                        "reranker",
+                        name=str(reranker_name),
+                        candidates=self._candidate_trace_records(
+                            result,
+                            branch="reranker",
+                        ),
+                    )
+
+        diversity_exclusions = []
+
+        def record_diversity_exclusion(doc_id, reason):
+            diversity_exclusions.append({"id": doc_id, "reason": reason})
 
         result = select_diverse_documents(
             result,
             top_k=top_k,
             parent_section_cap=self.max_per_parent_or_section,
+            on_exclusion=(record_diversity_exclusion if trace is not None else None),
         )
-        self._trace_update(
-            trace,
-            diversity_selected_ids=[doc.doc_id for doc in result],
-        )
+        if trace is not None:
+            self._trace_update(
+                trace,
+                diversity_selected_ids=[doc.doc_id for doc in result],
+            )
+            self._trace_event(
+                trace,
+                "diversity",
+                excluded=diversity_exclusions,
+                selected_ids=[doc.doc_id for doc in result],
+            )
         print(f"Got raw {len(result)} retrieved documents")
 
         # add page thumbnails to the result if exists
@@ -716,7 +945,14 @@ class VectorRetrieval(BaseRetrieval):
             else:
                 final_result.append(linked_thumbnails_by_text_id.get(doc.doc_id, doc))
 
-        return final_result[: max(0, top_k)]
+        final_result = final_result[: max(0, top_k)]
+        if trace is not None:
+            self._trace_event(
+                trace,
+                "final",
+                ids=[doc.doc_id for doc in final_result],
+            )
+        return final_result
 
 
 class TextVectorQA(BaseComponent):

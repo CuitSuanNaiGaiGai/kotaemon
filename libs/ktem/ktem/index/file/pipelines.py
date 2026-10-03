@@ -42,6 +42,7 @@ from kotaemon.indices.ingests.files import (
 )
 from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
 from kotaemon.indices.knowledge.metadata import normalize_knowledge_metadata
+from kotaemon.indices.knowledge.retrieval.trace import trace_event
 from kotaemon.indices.rankings import BaseReranking, LLMReranking, LLMTrulensScoring
 from kotaemon.indices.splitters import BaseSplitter, TokenSplitter
 
@@ -140,8 +141,11 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
             doc_ids = flatten_doc_ids
 
         print("searching in doc_ids", doc_ids)
+        trace = kwargs.get("trace")
         if not doc_ids:
             logger.info(f"Skip retrieval because of no selected files: {self}")
+            trace_event(trace, "no_search", reason="empty_ui_selection")
+            trace_event(trace, "final_ui", ids=[])
             return []
 
         vector_retrieval = self.vector_retrieval
@@ -171,11 +175,16 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
             text,
             top_k=self.top_k,
             allowed_source_ids=doc_ids,
-            trace=kwargs.get("trace"),
+            trace=trace,
         )
         print("retrieval step took", time.time() - s_time)
 
         if not self.get_extra_table:
+            trace_event(
+                trace,
+                "final_ui",
+                ids=[doc.doc_id for doc in docs],
+            )
             return docs
 
         # retrieve extra nodes relate to table
@@ -197,18 +206,25 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
         ]
         if queries:
             try:
-                extra_docs = self.vector_retrieval(
+                extra_trace = trace
+                if trace is not None and callable(getattr(trace, "scoped", None)):
+                    extra_trace = trace.scoped(query_kind="extra_table")
+                extra_kwargs = dict(
                     text="",
                     top_k=50,
                     scope=chunk_ids,
                     where=queries[0] if len(queries) == 1 else {"$or": queries},
                 )
+                if trace is not None:
+                    extra_kwargs["trace"] = extra_trace
+                extra_docs = self.vector_retrieval(**extra_kwargs)
                 for doc in extra_docs:
                     if doc.doc_id in chunk_ids and doc.doc_id not in retrieved_id:
                         docs.append(doc)
             except Exception:
                 print("Error retrieving additional tables")
 
+        trace_event(trace, "final_ui", ids=[doc.doc_id for doc in docs])
         return docs
 
     def generate_relevant_scores(

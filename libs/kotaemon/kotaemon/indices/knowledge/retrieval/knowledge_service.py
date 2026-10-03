@@ -13,6 +13,8 @@ from kotaemon.indices.knowledge.planning.query_planner import (
 )
 from kotaemon.indices.knowledge.schema import SUPPORTED_SOURCE_TYPES
 
+from .trace import trace_event
+
 
 class _BoundedCatalog:
     """A planner view containing only sources that passed caller constraints."""
@@ -54,18 +56,70 @@ class KnowledgeService:
         trace: Any | None = None,
     ) -> list[RetrievedDocument]:
         """Search within visible sources and preserve their mandatory constraints."""
+        trace_event(trace, "request", original_query=query)
         if allowed_source_ids is not None and not self._normalize_ids(
             allowed_source_ids
         ):
+            trace_event(
+                trace,
+                "explicit_filters",
+                path=path,
+                source_types=source_types,
+                metadata_filters=filters,
+            )
+            trace_event(
+                trace,
+                "source_scope",
+                visible_ids=[],
+                mandatory_ids=[],
+                planned_ids=None,
+            )
+            trace_event(
+                trace,
+                "chunk_scope",
+                visible_ids=[],
+                mandatory_ids=[],
+                planned_ids=None,
+            )
+            trace_event(trace, "no_search", reason="empty_visibility")
             return []
 
         visible_sources = self._visible_sources(allowed_source_ids)
         if not visible_sources:
+            trace_event(
+                trace,
+                "explicit_filters",
+                path=path,
+                source_types=source_types,
+                metadata_filters=filters,
+            )
+            trace_event(
+                trace,
+                "source_scope",
+                visible_ids=[],
+                mandatory_ids=[],
+                planned_ids=None,
+            )
+            trace_event(
+                trace,
+                "chunk_scope",
+                visible_ids=[],
+                mandatory_ids=[],
+                planned_ids=None,
+            )
+            trace_event(trace, "no_search", reason="no_visible_sources")
             return []
 
         normalized_path = normalize_logical_path(path) if path is not None else None
         normalized_types = self._normalize_source_types(source_types)
         normalized_filters = self._normalize_filters(filters, visible_sources)
+        trace_event(
+            trace,
+            "explicit_filters",
+            path=normalized_path,
+            source_types=(list(normalized_types) if source_types is not None else None),
+            metadata_filters=normalized_filters,
+        )
 
         mandatory_sources = [
             source
@@ -79,6 +133,21 @@ class KnowledgeService:
         ]
         mandatory_ids = [source.source_id for source in mandatory_sources]
         if not mandatory_ids:
+            trace_event(
+                trace,
+                "source_scope",
+                visible_ids=[source.source_id for source in visible_sources],
+                mandatory_ids=[],
+                planned_ids=None,
+            )
+            trace_event(
+                trace,
+                "chunk_scope",
+                visible_ids=[],
+                mandatory_ids=[],
+                planned_ids=None,
+            )
+            trace_event(trace, "no_search", reason="explicit_filters_no_match")
             return []
 
         bounded_catalog = _BoundedCatalog(mandatory_sources)
@@ -90,11 +159,14 @@ class KnowledgeService:
             allowed_source_ids=mandatory_ids,
         )
 
-        chunk_map = self.catalog.chunk_ids(mandatory_ids, relation_type="document")
+        visible_ids = [source.source_id for source in visible_sources]
+        chunk_map = self.catalog.chunk_ids(visible_ids, relation_type="document")
         mandatory_chunks = self._flatten_chunks(mandatory_ids, chunk_map)
+        visible_chunks = self._flatten_chunks(visible_ids, chunk_map)
 
         planned_source_ids = getattr(plan, "source_ids", None)
         if planned_source_ids is None:
+            planned_ids = None
             planned_chunks = None
         else:
             mandatory_set = set(mandatory_ids)
@@ -105,13 +177,31 @@ class KnowledgeService:
             ]
             planned_chunks = self._flatten_chunks(planned_ids, chunk_map)
 
-        documents = self.retriever(
+        trace_event(trace, "plan", plan=plan.to_dict())
+        trace_event(
+            trace,
+            "source_scope",
+            visible_ids=visible_ids,
+            mandatory_ids=mandatory_ids,
+            planned_ids=planned_ids,
+        )
+        trace_event(
+            trace,
+            "chunk_scope",
+            visible_ids=visible_chunks,
+            mandatory_ids=mandatory_chunks,
+            planned_ids=planned_chunks,
+        )
+
+        retrieval_kwargs = dict(
             text=getattr(plan, "semantic_query", query),
             top_k=top_k,
             scope=planned_chunks,
             fallback_scope=mandatory_chunks,
-            trace=trace,
         )
+        if trace is not None:
+            retrieval_kwargs["trace"] = trace
+        documents = self.retriever(**retrieval_kwargs)
         authorized_chunks = set(mandatory_chunks)
         return [
             document for document in documents if document.doc_id in authorized_chunks

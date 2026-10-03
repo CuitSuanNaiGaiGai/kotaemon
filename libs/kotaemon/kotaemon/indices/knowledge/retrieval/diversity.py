@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Optional
 
 from kotaemon.base import RetrievedDocument
@@ -64,6 +64,7 @@ def select_diverse_documents(
     parent_section_cap: Optional[int] = 2,
     overlap_threshold: float = 0.85,
     min_overlap_chars: int = 60,
+    on_exclusion: Callable[[str | None, str], None] | None = None,
 ) -> list[RetrievedDocument]:
     """Deduplicate and cap siblings while retaining reranker order.
 
@@ -85,12 +86,16 @@ def select_diverse_documents(
     for index, document in enumerate(documents):
         doc_id = document.doc_id
         if doc_id is not None and doc_id in seen_ids:
+            if on_exclusion is not None:
+                on_exclusion(doc_id, "duplicate_id")
             continue
         if doc_id is not None:
             seen_ids.add(doc_id)
 
         normalized_text = _normalize_text(str(document.text or ""))
         if normalized_text and normalized_text in seen_exact_text:
+            if on_exclusion is not None:
+                on_exclusion(doc_id, "duplicate_text")
             continue
 
         if normalized_text and any(
@@ -105,6 +110,8 @@ def select_diverse_documents(
             for _, prior, prior_text, _ in unique
             if prior_text
         ):
+            if on_exclusion is not None:
+                on_exclusion(doc_id, "overlap")
             continue
 
         if normalized_text:
@@ -127,5 +134,10 @@ def select_diverse_documents(
     selected = list(accepted)
     if len(selected) < top_k:
         selected.extend(deferred[: top_k - len(selected)])
+    selected_indexes = {index for index, _ in selected}
+    if on_exclusion is not None:
+        for index, document in deferred:
+            if index not in selected_indexes:
+                on_exclusion(document.doc_id, "group_cap")
     selected.sort(key=lambda item: item[0])
     return [document for _, document in selected[:top_k]]

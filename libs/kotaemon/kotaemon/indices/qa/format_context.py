@@ -8,6 +8,7 @@ from typing import Any
 import tiktoken
 
 from kotaemon.base import BaseComponent, Document, RetrievedDocument
+from kotaemon.indices.knowledge.retrieval.trace import trace_event, trace_update
 from kotaemon.indices.splitters import TokenSplitter
 
 EVIDENCE_MODE_TEXT = 0
@@ -186,18 +187,7 @@ class PrepareEvidencePipeline(BaseComponent):
 
         return _default_token_count
 
-    @staticmethod
-    def _trace_update(trace: Any, **fields) -> None:
-        if trace is None:
-            return
-        try:
-            trace.update(fields)
-        except Exception:
-            logger.exception("Could not update optional context trace")
-
-    def run(
-        self, docs: list[RetrievedDocument], trace: dict[str, Any] | None = None
-    ) -> Document:
+    def run(self, docs: list[RetrievedDocument], trace: Any | None = None) -> Document:
         evidence = ""
         images = []
         included_modes: list[int] = []
@@ -250,10 +240,17 @@ class PrepareEvidencePipeline(BaseComponent):
         else:
             evidence_mode = EVIDENCE_MODE_TEXT
 
-        self._trace_update(
+        trace_update(
             trace,
             context_chunk_ids=included_ids,
             context_tokens=used_tokens,
             context_token_budget=budget,
+        )
+        trace_event(
+            trace,
+            "context",
+            chunk_ids=included_ids,
+            token_budget=budget,
+            tokens_used=used_tokens,
         )
         return Document(content=(evidence_mode, evidence, images))

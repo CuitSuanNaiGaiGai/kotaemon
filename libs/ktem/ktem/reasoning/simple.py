@@ -23,6 +23,7 @@ from kotaemon.base import (
     RetrievedDocument,
     SystemMessage,
 )
+from kotaemon.indices.knowledge.retrieval.trace import trace_event
 from kotaemon.indices.qa.citation_qa import (
     CONTEXT_RELEVANT_WARNING_SCORE,
     DEFAULT_QA_TEXT_PROMPT,
@@ -106,7 +107,11 @@ class FullQAPipeline(BaseReasoning):
     add_query_context: AddQueryContextPipeline = AddQueryContextPipeline.withx()
 
     def retrieve(
-        self, message: str, history: list
+        self,
+        message: str,
+        history: list,
+        trace=None,
+        trace_context: dict | None = None,
     ) -> tuple[list[RetrievedDocument], list[Document]]:
         """Retrieve the documents based on the message"""
         # if len(message) < self.trigger_context:
@@ -124,12 +129,39 @@ class FullQAPipeline(BaseReasoning):
             # like "Hello", "I need help"...
             query = message
 
+        query_context = dict(trace_context or {})
+        trace_event(
+            trace,
+            "qa_query",
+            original_query=message,
+            **query_context,
+        )
+
         docs, doc_ids = [], []
         plot_docs = []
 
         for idx, retriever in enumerate(self.retrievers):
             retriever_node = self._prepare_child(retriever, f"retriever_{idx}")
-            retriever_docs = retriever_node(text=query)
+            retriever_name = type(retriever).__name__
+            retriever_trace = trace
+            if trace is not None and callable(getattr(trace, "scoped", None)):
+                retriever_trace = trace.scoped(
+                    retriever_index=idx,
+                    retriever_name=retriever_name,
+                    **query_context,
+                )
+            retriever_kwargs = {"text": query}
+            if trace is not None:
+                retriever_kwargs["trace"] = retriever_trace
+            retriever_docs = retriever_node(**retriever_kwargs)
+            trace_event(
+                trace,
+                "qa_retriever",
+                retriever_index=idx,
+                retriever_name=retriever_name,
+                ids=[doc.doc_id for doc in retriever_docs],
+                **query_context,
+            )
 
             retriever_docs_text = []
             retriever_docs_plot = []
@@ -288,11 +320,23 @@ class FullQAPipeline(BaseReasoning):
 
         print(f"Retrievers {self.retrievers}")
         # should populate the context
-        docs, infos = self.retrieve(message, history)
+        trace = kwargs.get("trace")
+        docs, infos = self.retrieve(
+            message,
+            history,
+            trace=trace,
+            trace_context={"query_kind": "main"},
+        )
         print(f"Got {len(docs)} retrieved documents")
         yield from infos
 
-        evidence_mode, evidence, images = self.evidence_pipeline(docs).content
+        evidence_trace = trace
+        if trace is not None and callable(getattr(trace, "scoped", None)):
+            evidence_trace = trace.scoped(query_kind="main")
+        evidence_kwargs = {"trace": evidence_trace} if trace is not None else {}
+        evidence_mode, evidence, images = self.evidence_pipeline(
+            docs, **evidence_kwargs
+        ).content
 
         def generate_relevant_scores():
             nonlocal docs
@@ -496,12 +540,26 @@ class FullDecomposeQAPipeline(FullQAPipeline):
                 f"<br>{message}<br><b>Answer</b><br>",
             )
             # should populate the context
-            docs, infos = self.retrieve(message, history)
+            trace = kwargs.get("trace")
+            docs, infos = self.retrieve(
+                message,
+                history,
+                trace=trace,
+                trace_context={"query_kind": "subquestion", "subquestion_index": idx},
+            )
             print(f"Got {len(docs)} retrieved documents")
 
             yield from infos
 
-            evidence_mode, evidence, images = self.evidence_pipeline(docs).content
+            evidence_trace = trace
+            if trace is not None and callable(getattr(trace, "scoped", None)):
+                evidence_trace = trace.scoped(
+                    query_kind="subquestion", subquestion_index=idx
+                )
+            evidence_kwargs = {"trace": evidence_trace} if trace is not None else {}
+            evidence_mode, evidence, images = self.evidence_pipeline(
+                docs, **evidence_kwargs
+            ).content
             answer = yield from self.answering_pipeline.stream(
                 question=message,
                 history=history,
@@ -547,11 +605,23 @@ class FullDecomposeQAPipeline(FullQAPipeline):
         )
 
         # should populate the context
-        docs, infos = self.retrieve(message, history)
+        trace = kwargs.get("trace")
+        docs, infos = self.retrieve(
+            message,
+            history,
+            trace=trace,
+            trace_context={"query_kind": "main"},
+        )
         print(f"Got {len(docs)} retrieved documents")
         yield from infos
 
-        evidence_mode, evidence, images = self.evidence_pipeline(docs).content
+        evidence_trace = trace
+        if trace is not None and callable(getattr(trace, "scoped", None)):
+            evidence_trace = trace.scoped(query_kind="main")
+        evidence_kwargs = {"trace": evidence_trace} if trace is not None else {}
+        evidence_mode, evidence, images = self.evidence_pipeline(
+            docs, **evidence_kwargs
+        ).content
         answer = yield from self.answering_pipeline.stream(
             question=message,
             history=history,
