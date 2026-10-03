@@ -20,5 +20,6 @@ Task 14: complete (commits `9dee88cc` and `d1dd9b3d`; GPT-6 Sol Medium re-review
 Spec: `docs/superpowers/specs/2026-10-03-local-mini-corpus-experiment-design.md` (commit `0d4656d6`, delta clarified in `858ee602`)
 Plan: `docs/superpowers/plans/2026-10-03-mini-corpus-golden-experiment.md` (commit `858ee602`)
 Workflow: each numbered plan task is implemented by GPT-6 Luna Max using TDD, then reviewed by GPT-6 Sol Medium before the next task starts.
-Task 1: complete (commits `2e2bf9e1` and `ca2f77b6`; GPT-6 Sol Medium review approved; 5 focused tests pass; full suite 284 passed, 20 skipped)
-Tasks 2–7: pending
+Task 1: complete (commits `2e2bf9e1` and `ca2f77b6`; GPT-6 Sol Medium review approved; 5 focused tests pass; full suite 284 passed, 20 skipped; report: `.superpowers/sdd/local-mini-corpus-task-1-report.md`)
+Task 2: complete (commits `25d5eadc`, `d4ec0f82`, `27082984`, and `81bdb575`; GPT-6 Sol Medium re-review approved after two Important code fixes; 9 focused tests pass; report: `.superpowers/sdd/local-mini-corpus-task-2-report.md`)
+Tasks 3–7: pending

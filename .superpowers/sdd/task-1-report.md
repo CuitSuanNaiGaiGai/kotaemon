@@ -1,138 +1,58 @@
-# Task 1: Deterministic Local Corpus Inventory — Implementation Report
+# Task 1: Canonical Knowledge Metadata — Implementation Report
 
 ## Result
 
-Implemented a read-only inventory for the curated local evaluation corpus. The
-supported suffixes are `.pdf`, `.docx`, `.md`, and `.xlsx`. Rows use root-relative
-POSIX paths and sort lexically by that path. Each source ID is the full lowercase
-SHA-256 digest of the exact file bytes. Byte-identical files retain separate rows;
-the first sorted path is canonical and later rows identify it through
-`duplicate_of`.
+Implemented the canonical knowledge metadata schema and normalizer without changing `Document`. The normalizer copies document metadata, applies overrides, derives the canonical fields, and returns a separate dictionary. Source types are `markdown`, `pdf`, `faq`, `ppt`, `excel`, `code`, `wiki`, and `other`.
 
-The inventory skips `.DS_Store`, Office lock files beginning with `~$`, symlinks,
-and unsupported suffixes. Hashing and byte counting read one MiB chunks, so a large
-source is not loaded fully into memory. No source files are written or changed.
+## TDD evidence
 
-The new test helpers build deterministic synthetic documents and a small generated
-four-source Markdown corpus. All inventory test files were generated under pytest's
-temporary directory; no user documents were enumerated or parsed.
-
-## TDD Evidence
-
-### Inventory RED
-
-Command:
+**RED command:**
 
 ```text
-uv run pytest libs/kotaemon/tests/test_knowledge_eval_local_corpus.py -q
+uv run pytest libs/kotaemon/tests/test_knowledge_metadata.py -q
 ```
 
-Expected failure before implementation:
+**RED output:** collection failed as expected because the package did not exist:
 
 ```text
-ModuleNotFoundError: No module named 'kotaemon.indices.knowledge.evaluation.local_corpus'
+ImportError while importing test module ...
+ModuleNotFoundError: No module named 'kotaemon.indices.knowledge'
 1 error in 4.94s
 ```
 
-### Generated-fixture RED
-
-After adding the helper contract to the tests, the same focused command failed
-because the fixture module was not yet present:
+**GREEN command:**
 
 ```text
-ModuleNotFoundError: No module named 'tests.knowledge_eval_test_fixtures'
-1 error in 2.86s
+uv run pytest libs/kotaemon/tests/test_knowledge_metadata.py -q
 ```
 
-### Streaming-hash RED
-
-Command:
+**GREEN output:** all nine collected cases passed:
 
 ```text
-uv run pytest libs/kotaemon/tests/test_knowledge_eval_local_corpus.py::test_scan_sources_hashes_files_in_bounded_chunks -q
+9 passed in 5.53s
 ```
 
-The new bounded-read regression test failed against the original whole-file read:
-
-```text
-AssertionError: assert 0 < -1
-FAILED ...::test_scan_sources_hashes_files_in_bounded_chunks
-1 failed in 2.84s
-```
-
-### Focused GREEN
-
-Command:
-
-```text
-uv run pytest libs/kotaemon/tests/test_knowledge_eval_local_corpus.py -q
-```
-
-Final focused output:
-
-```text
-test_scan_sources_assigns_stable_ids_and_orders_paths PASSED
-test_scan_sources_deduplicates_bytes_and_excludes_lock_files PASSED
-test_scan_sources_excludes_symlinks PASSED
-test_scan_sources_hashes_files_in_bounded_chunks PASSED
-test_generated_corpus_and_document_fixtures_are_deterministic PASSED
-============================== 5 passed in 2.45s ===============================
-```
-
-### Full core test suite
-
-Command:
-
-```text
-uv run pytest libs/kotaemon/tests -q
-```
-
-Output summary:
-
-```text
-=========== 284 passed, 20 skipped, 94 warnings in 166.74s ===========
-```
-
-This was the single full-suite run required by the task. It completed before the
-small streaming-hash follow-up; the focused suite was rerun after that change.
-The full-suite warnings were emitted by unrelated optional integrations and
-dependency deprecations, including Gradio/FastAPI, `pkg_resources`, and an async
-mock warning.
-
-### Formatting and diff checks
-
-`uv run black --check` reported four files unchanged before the streaming-hash
-follow-up. Black then reported the two follow-up files unchanged. `git diff --check`
-completed with no output and exit code 0.
-
-## Self-review and independent review
-
-The initial GPT-6 Sol Medium review found no Critical or Important issues. It
-identified one Minor memory concern: reading complete files into memory. The
-follow-up changed hashing to bounded one MiB reads and added a regression test
-that verifies the bound, exact digest, and byte count. The reviewer rechecked the
-follow-up diff and reported no remaining issues; the bounded-read test was judged
-sound.
+Ran `uv run black libs/kotaemon/kotaemon/indices/knowledge libs/kotaemon/tests/test_knowledge_metadata.py` (formatted two files) and `git diff --check` successfully before commit.
 
 ## Changed files
 
-- `libs/kotaemon/kotaemon/indices/knowledge/evaluation/local_corpus.py`
-- `libs/kotaemon/kotaemon/indices/knowledge/evaluation/__init__.py`
-- `libs/kotaemon/tests/test_knowledge_eval_local_corpus.py`
-- `libs/kotaemon/tests/knowledge_eval_test_fixtures.py`
-- `.superpowers/sdd/task-1-report.md`
+- `libs/kotaemon/kotaemon/indices/knowledge/__init__.py`
+- `libs/kotaemon/kotaemon/indices/knowledge/schema.py`
+- `libs/kotaemon/kotaemon/indices/knowledge/metadata.py`
+- `libs/kotaemon/tests/test_knowledge_metadata.py`
 
-## Cleanup
+## Self-review findings
 
-The full test suite created three root-level directories named like
-`<MagicMock name='create' id=...>`, each containing a generated Chroma database.
-All three test artifacts were removed before commit. The pre-existing Task 15
-section in `.superpowers/sdd/progress.md` was preserved and updated only to mark
-Task 1 complete while leaving Tasks 2–7 pending.
+- File-extension inference follows the brief's mapping, and explicit supported types (including `wiki`) take precedence.
+- Logical paths use POSIX segment handling only; parent segments are collapsed and absolute upload paths are not used as defaults when a file name exists.
+- Metadata is copied and caller overrides are applied to the copy. The normalizer does not modify the `Document`.
+- Identifier precedence follows the brief. Source relationships supply document/parent identifiers when earlier values are absent; `chunk_id` is always the input `Document.doc_id`.
+- Original metadata fields, `Document.source`, page aliases, section path, and entity fallback are covered by the focused tests.
 
-## Commits
+## Concerns
 
-- `2e2bf9e1f2a553e63716c4a7af5edc59acc2565b` — `feat: inventory local evaluation corpus`
-- `ca2f77b6` — `perf: stream local corpus hashing`
+No blocking concerns. The brief did not provide an enumerated list for the eight source types in prose; the implementation used the eight values implied by its explicit examples and extension table (`markdown`, `pdf`, `faq`, `ppt`, `excel`, `code`, `wiki`, `other`).
 
-No blocking concerns remain. The full suite reported 94 warnings, but no failures.
+## Commit
+
+Implementation commit: `e516fa314ebb516b46dbeca6bd5e2e21742c70d6`. The report was committed in a follow-up documentation commit.
