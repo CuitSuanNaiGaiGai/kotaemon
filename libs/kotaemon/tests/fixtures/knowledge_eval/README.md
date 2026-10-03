@@ -12,6 +12,30 @@ The evaluation runner currently reads only these two root-level files. Keep
 them as the unchanged default fixture; the runner does not discover or read
 anything under `local/`.
 
+## Optional local model runtime
+
+Local BGE evaluation requires the `kotaemon[local-eval]` extra, pinned to
+`FlagEmbedding==1.4.2`, and explicit local directories for `BAAI/bge-m3` and
+`BAAI/bge-reranker-v2-m3`. Start the inference process with
+`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`. Before importing
+FlagEmbedding, the adapters check those environment flags, the Hub and
+Transformers offline states, and the active Hub session's offline adapters. If
+any library or session was initialized online, loading fails and asks for a
+fresh offline inference process; the adapters do not change cached process
+state after imports.
+
+Preflight parses `config.json` and checks that the required tokenizer and
+weight files are present. It cannot guarantee that the local tokenizer or
+weights can be loaded. If model construction fails, the error identifies the
+BAAI model ID and local path and recommends repairing or re-downloading that
+snapshot. Inference never downloads models or sends queries and passages to a
+remote service.
+
+Adapter metadata includes model IDs, weight-file SHA-256 hashes, device,
+FlagEmbedding version, and truncation lengths. Revision and cached/downloaded
+origin are included only when supplied by the model-management flow; adapters
+do not infer them from a directory.
+
 ## Local source drop-zone and draft outputs
 
 Put user-provided original materials under
