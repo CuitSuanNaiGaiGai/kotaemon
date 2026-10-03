@@ -35,10 +35,23 @@ def test_selected_source_ids_are_resolved_to_chunk_scope(monkeypatch, tmp_path):
         target_id = Column(String)
         relation_type = Column(String)
 
+    class Source(base):
+        __tablename__ = "source"
+        id = Column(String, primary_key=True)
+        name = Column(String)
+        user = Column(String)
+        note = Column(String)
+
     engine = create_engine(f"sqlite:///{tmp_path / 'index.db'}")
     base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
     with session_factory() as session:
+        session.add_all(
+            [
+                Source(id="source-a", name="a.md", user="", note=None),
+                Source(id="source-b", name="b.md", user="", note=None),
+            ]
+        )
         session.add_all(
             [
                 Index(
@@ -51,9 +64,13 @@ def test_selected_source_ids_are_resolved_to_chunk_scope(monkeypatch, tmp_path):
         )
         session.commit()
 
+    from ktem.index.file.knowledge_service import create_file_knowledge_service
+
     monkeypatch.setattr(
-        "ktem.index.file.pipelines.Session",
-        lambda *_args, **_kwargs: session_factory(),
+        "ktem.index.file.pipelines.create_file_knowledge_service",
+        lambda **kwargs: create_file_knowledge_service(
+            **kwargs, session_factory=session_factory
+        ),
     )
     vector = InMemoryVectorStore()
     vector.add(
@@ -74,6 +91,7 @@ def test_selected_source_ids_are_resolved_to_chunk_scope(monkeypatch, tmp_path):
     )
     pipeline = DocumentRetrievalPipeline(
         embedding=FixedEmbeddings(),
+        Source=Source,
         Index=Index,
         VS=vector,
         DS=docs,

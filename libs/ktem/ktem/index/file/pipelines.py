@@ -21,12 +21,6 @@ from ktem.llms.manager import llms
 from ktem.rerankings.manager import reranking_models_manager
 from llama_index.core.readers.base import BaseReader
 from llama_index.core.readers.file.base import default_file_metadata_func
-from llama_index.core.vector_stores import (
-    FilterCondition,
-    FilterOperator,
-    MetadataFilter,
-    MetadataFilters,
-)
 from llama_index.core.vector_stores.types import VectorStoreQueryMode
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -52,6 +46,7 @@ from kotaemon.indices.rankings import BaseReranking, LLMReranking, LLMTrulensSco
 from kotaemon.indices.splitters import BaseSplitter, TokenSplitter
 
 from .base import BaseFileIndexIndexing, BaseFileIndexRetriever
+from .knowledge_service import create_file_knowledge_service
 
 logger = logging.getLogger(__name__)
 
@@ -127,15 +122,19 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
             text: the text to retrieve similar documents
             doc_ids: list of document ids to constraint the retrieval
         """
-        # flatten doc_ids in case of group of doc_ids are passed
-        if doc_ids:
+        # Flatten file-group IDs before passing the explicit UI selection to the
+        # knowledge service.
+        if doc_ids is not None:
             flatten_doc_ids = []
             for doc_id in doc_ids:
                 if doc_id is None:
                     raise ValueError("No document is selected")
 
                 if doc_id.startswith("["):
-                    flatten_doc_ids.extend(json.loads(doc_id))
+                    group_ids = json.loads(doc_id)
+                    if not isinstance(group_ids, list):
+                        raise ValueError("File group selection must contain a list")
+                    flatten_doc_ids.extend(group_ids)
                 else:
                     flatten_doc_ids.append(doc_id)
             doc_ids = flatten_doc_ids
@@ -145,40 +144,35 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
             logger.info(f"Skip retrieval because of no selected files: {self}")
             return []
 
-        retrieval_kwargs: dict = {}
-        with Session(engine) as session:
-            stmt = select(self.Index).where(
-                self.Index.relation_type == "document",
-                self.Index.source_id.in_(doc_ids),
-            )
-            results = session.execute(stmt)
-            chunk_ids = [r[0].target_id for r in results.all()]
+        vector_retrieval = self.vector_retrieval
 
-        # do first round top_k extension
-        retrieval_kwargs["do_extend"] = True
-        retrieval_kwargs["scope"] = chunk_ids
-        retrieval_kwargs["filters"] = MetadataFilters(
-            filters=[
-                MetadataFilter(
-                    key="file_id",
-                    value=doc_ids,
-                    operator=FilterOperator.IN,
-                )
-            ],
-            condition=FilterCondition.OR,
+        def run_vector_retrieval(**retrieval_kwargs):
+            # Keep the file UI's expanded first pass and optional MMR setting
+            # while routing Agent/service search through the existing retriever.
+            retrieval_kwargs["do_extend"] = True
+            if self.mmr:
+                retrieval_kwargs["mode"] = VectorStoreQueryMode.MMR
+                retrieval_kwargs["mmr_threshold"] = 0.5
+            return vector_retrieval(**retrieval_kwargs)
+
+        service = create_file_knowledge_service(
+            Source=self.Source,
+            Index=self.Index,
+            vector_retrieval=run_vector_retrieval,
+            docstore=self.DS,
+            private=self.private,
+            user_id=self.user_id,
         )
-        if "trace" in kwargs:
-            retrieval_kwargs["trace"] = kwargs["trace"]
+        chunk_ids = service.chunk_ids_for_sources(doc_ids)
 
-        if self.mmr:
-            # TODO: double check that llama-index MMR works correctly
-            retrieval_kwargs["mode"] = VectorStoreQueryMode.MMR
-            retrieval_kwargs["mmr_threshold"] = 0.5
-
-        # rerank
+        # Preserve the caller's exact source allowlist at the service boundary.
         s_time = time.time()
-        print(f"retrieval_kwargs: {retrieval_kwargs.keys()}")
-        docs = self.vector_retrieval(text=text, top_k=self.top_k, **retrieval_kwargs)
+        docs = service.search(
+            text,
+            top_k=self.top_k,
+            allowed_source_ids=doc_ids,
+            trace=kwargs.get("trace"),
+        )
         print("retrieval step took", time.time() - s_time)
 
         if not self.get_extra_table:
@@ -210,7 +204,7 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
                     where=queries[0] if len(queries) == 1 else {"$or": queries},
                 )
                 for doc in extra_docs:
-                    if doc.doc_id not in retrieved_id:
+                    if doc.doc_id in chunk_ids and doc.doc_id not in retrieved_id:
                         docs.append(doc)
             except Exception:
                 print("Error retrieving additional tables")

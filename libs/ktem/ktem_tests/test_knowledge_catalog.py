@@ -145,6 +145,10 @@ def test_catalog_filters_private_visibility_and_allowed_source_ids(tmp_path):
     assert catalog.chunk_ids(["owner", "other", "missing"]) == {
         "owner": ("owner-chunk",),
     }
+    assert catalog.source_ids_for_chunk_ids(
+        ["owner-chunk", "owner-vector", "other-chunk"],
+        allowed_source_ids=["owner", "other"],
+    ) == {"owner-chunk": ("owner",)}
 
     # The logical path comes from note metadata and never from Source.path.
     owner = next(item for item in sources if item.source_id == "owner")
@@ -161,6 +165,7 @@ def test_catalog_filters_private_visibility_and_allowed_source_ids(tmp_path):
     )
     assert anonymous_catalog.list_sources() == []
     assert anonymous_catalog.chunk_ids(["owner"]) == {}
+    assert anonymous_catalog.source_ids_for_chunk_ids(["owner-chunk"]) == {}
 
 
 def test_public_catalog_still_intersects_explicit_allowlist(tmp_path):

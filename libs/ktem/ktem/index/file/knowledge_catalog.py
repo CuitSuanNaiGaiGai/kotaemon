@@ -133,6 +133,53 @@ class KnowledgeCatalog:
             for source_id, chunk_ids in sorted(grouped.items())
         }
 
+    def source_ids_for_chunk_ids(
+        self,
+        chunk_ids: Sequence[str],
+        *,
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> dict[str, tuple[str, ...]]:
+        """Resolve chunk IDs through document relations and visible SQL sources."""
+        requested_chunks = self._normalize_allowed_ids(chunk_ids) or set()
+        allowed = self._normalize_allowed_ids(allowed_source_ids)
+        if (
+            not requested_chunks
+            or allowed_source_ids is not None
+            and not allowed
+            or self.private
+            and not self.user_id
+        ):
+            return {}
+
+        statement = (
+            select(self.Index.target_id, self.Index.source_id)
+            .join(self.Source, self.Index.source_id == self.Source.id)
+            .where(
+                self.Index.target_id.in_(requested_chunks),
+                self.Index.relation_type == "document",
+            )
+        )
+        if self.private:
+            statement = statement.where(self.Source.user == self.user_id)
+        if allowed is not None:
+            statement = statement.where(self.Index.source_id.in_(allowed))
+
+        grouped: dict[str, set[str]] = {}
+        with self.session_factory() as session:
+            for target_id, source_id in session.execute(statement).all():
+                if (
+                    isinstance(target_id, str)
+                    and isinstance(source_id, str)
+                    and target_id in requested_chunks
+                    and (allowed is None or source_id in allowed)
+                ):
+                    grouped.setdefault(target_id, set()).add(source_id)
+
+        return {
+            chunk_id: tuple(sorted(source_ids))
+            for chunk_id, source_ids in sorted(grouped.items())
+        }
+
     @staticmethod
     def _normalize_allowed_ids(source_ids):
         if source_ids is None:
