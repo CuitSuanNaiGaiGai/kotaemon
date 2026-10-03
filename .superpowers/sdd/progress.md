@@ -25,5 +25,5 @@ Task 2: complete (commits `25d5eadc`, `d4ec0f82`, `27082984`, and `81bdb575`; GP
 Task 3: complete (commit `2326e634`; GPT-6 Sol Medium re-review approved after fixing an unchecked source relation and making nested judgments immutable; 66 focused tests pass; report: `.superpowers/sdd/local-mini-corpus-task-3-report.md`)
 Task 4: complete (commit `226d5f06`; GPT-6 Sol Medium review approved; 19 focused tests pass, 85 combined Task 3/4 tests pass; report: `.superpowers/sdd/local-mini-corpus-task-4-report.md`)
 Task 5: complete (commit `53e982ec`; GPT-6 Sol Medium re-review approved after two Important fixes; 24 focused tests pass; no models/corpus/metrics; report: `.superpowers/sdd/local-mini-corpus-task-5-report.md`)
-Task 6: complete (GPT-6 Sol Medium approved; implementation/review-fix commits pending parent commit; 17 focused tests pass; combined six-module suite 135 passed, 6 warnings; report: `.superpowers/sdd/local-mini-corpus-task-6-report.md`)
+Task 6: complete (commit `1a7b9d5a`; GPT-6 Sol Medium approved; 17 focused tests pass; combined six-module suite 135 passed, 6 warnings; report: `.superpowers/sdd/local-mini-corpus-task-6-report.md`)
 Task 7: pending

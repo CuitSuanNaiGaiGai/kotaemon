@@ -28,4 +28,4 @@ Task 7's CLI must record each model's resolved revision and whether its weights 
 
 ## Commit
 
-Implementation commit: pending.
+Implementation and review fixes: `1a7b9d5a`.
