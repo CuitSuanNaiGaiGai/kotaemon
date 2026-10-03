@@ -105,13 +105,17 @@ class KnowledgeService:
             ]
             planned_chunks = self._flatten_chunks(planned_ids, chunk_map)
 
-        return self.retriever(
+        documents = self.retriever(
             text=getattr(plan, "semantic_query", query),
             top_k=top_k,
             scope=planned_chunks,
             fallback_scope=mandatory_chunks,
             trace=trace,
         )
+        authorized_chunks = set(mandatory_chunks)
+        return [
+            document for document in documents if document.doc_id in authorized_chunks
+        ]
 
     def read(
         self,

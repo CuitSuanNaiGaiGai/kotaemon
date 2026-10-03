@@ -2,7 +2,7 @@
 
 import pytest
 
-from kotaemon.base import Document
+from kotaemon.base import Document, RetrievedDocument
 from kotaemon.indices.knowledge.planning.query_planner import KnowledgeSource
 from kotaemon.indices.knowledge.planning.retrieval_plan import RetrievalPlan
 from kotaemon.indices.knowledge.retrieval.knowledge_service import KnowledgeService
@@ -179,6 +179,78 @@ def test_selected_source_ids_are_intersected_with_malicious_planner_scope():
 
     assert retriever.calls[0]["scope"] == []
     assert retriever.calls[0]["fallback_scope"] == ["allow-chunk"]
+
+
+def test_search_filters_retriever_results_to_mandatory_authorized_chunks():
+    authorized = RetrievedDocument(
+        id_="allow-chunk", text="visible result", metadata={"file_id": "allowed"}
+    )
+    out_of_scope = RetrievedDocument(
+        id_="other-chunk", text="private result", metadata={"file_id": "other"}
+    )
+    service, _, _, retriever, _ = make_service(
+        sources=[source("allowed"), source("other")],
+        chunks_by_source={"allowed": ["allow-chunk"], "other": ["other-chunk"]},
+        planner=FixedPlanner(source_ids=["allowed", "other"], confidence=1.0),
+        retrieved=[authorized, out_of_scope],
+    )
+
+    result = service.search("question", allowed_source_ids=["allowed"])
+
+    assert [document.doc_id for document in result] == ["allow-chunk"]
+    assert retriever.calls[0]["scope"] == ["allow-chunk"]
+    assert retriever.calls[0]["fallback_scope"] == ["allow-chunk"]
+
+
+def test_search_keeps_mandatory_chunks_returned_by_approved_fallback():
+    fallback_doc = RetrievedDocument(
+        id_="fallback-chunk",
+        text="visible fallback result",
+        metadata={"file_id": "fallback-source"},
+    )
+    out_of_scope = RetrievedDocument(
+        id_="other-chunk", text="private result", metadata={"file_id": "other"}
+    )
+
+    class FallbackRetriever:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            kwargs["trace"]["scope_fallback"] = True
+            return [fallback_doc, out_of_scope]
+
+    retriever = FallbackRetriever()
+    catalog = MemoryCatalog(
+        [source("planned"), source("fallback-source"), source("other")],
+        {
+            "planned": ["planned-chunk"],
+            "fallback-source": ["fallback-chunk"],
+            "other": ["other-chunk"],
+        },
+    )
+    service = KnowledgeService(
+        planner=FixedPlanner(source_ids=["planned"], confidence=1.0),
+        catalog=catalog,
+        retriever=retriever,
+        docstore=MemoryDocstore([]),
+    )
+    trace = {"scope_fallback": False}
+
+    result = service.search(
+        "question",
+        allowed_source_ids=["planned", "fallback-source"],
+        trace=trace,
+    )
+
+    assert trace["scope_fallback"] is True
+    assert retriever.calls[0]["scope"] == ["planned-chunk"]
+    assert retriever.calls[0]["fallback_scope"] == [
+        "fallback-chunk",
+        "planned-chunk",
+    ]
+    assert [document.doc_id for document in result] == ["fallback-chunk"]
 
 
 def test_explicit_segment_path_type_and_entity_filters_are_mandatory():
