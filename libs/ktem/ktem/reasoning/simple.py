@@ -23,7 +23,7 @@ from kotaemon.base import (
     RetrievedDocument,
     SystemMessage,
 )
-from kotaemon.indices.knowledge.retrieval.trace import trace_event
+from kotaemon.indices.knowledge.retrieval.trace import trace_event, trace_scoped
 from kotaemon.indices.qa.citation_qa import (
     CONTEXT_RELEVANT_WARNING_SCORE,
     DEFAULT_QA_TEXT_PROMPT,
@@ -143,13 +143,12 @@ class FullQAPipeline(BaseReasoning):
         for idx, retriever in enumerate(self.retrievers):
             retriever_node = self._prepare_child(retriever, f"retriever_{idx}")
             retriever_name = type(retriever).__name__
-            retriever_trace = trace
-            if trace is not None and callable(getattr(trace, "scoped", None)):
-                retriever_trace = trace.scoped(
-                    retriever_index=idx,
-                    retriever_name=retriever_name,
-                    **query_context,
-                )
+            retriever_trace = trace_scoped(
+                trace,
+                retriever_index=idx,
+                retriever_name=retriever_name,
+                **query_context,
+            )
             retriever_kwargs = {"text": query}
             if trace is not None:
                 retriever_kwargs["trace"] = retriever_trace
@@ -330,9 +329,7 @@ class FullQAPipeline(BaseReasoning):
         print(f"Got {len(docs)} retrieved documents")
         yield from infos
 
-        evidence_trace = trace
-        if trace is not None and callable(getattr(trace, "scoped", None)):
-            evidence_trace = trace.scoped(query_kind="main")
+        evidence_trace = trace_scoped(trace, query_kind="main")
         evidence_kwargs = {"trace": evidence_trace} if trace is not None else {}
         evidence_mode, evidence, images = self.evidence_pipeline(
             docs, **evidence_kwargs
@@ -551,11 +548,9 @@ class FullDecomposeQAPipeline(FullQAPipeline):
 
             yield from infos
 
-            evidence_trace = trace
-            if trace is not None and callable(getattr(trace, "scoped", None)):
-                evidence_trace = trace.scoped(
-                    query_kind="subquestion", subquestion_index=idx
-                )
+            evidence_trace = trace_scoped(
+                trace, query_kind="subquestion", subquestion_index=idx
+            )
             evidence_kwargs = {"trace": evidence_trace} if trace is not None else {}
             evidence_mode, evidence, images = self.evidence_pipeline(
                 docs, **evidence_kwargs
@@ -615,9 +610,7 @@ class FullDecomposeQAPipeline(FullQAPipeline):
         print(f"Got {len(docs)} retrieved documents")
         yield from infos
 
-        evidence_trace = trace
-        if trace is not None and callable(getattr(trace, "scoped", None)):
-            evidence_trace = trace.scoped(query_kind="main")
+        evidence_trace = trace_scoped(trace, query_kind="main")
         evidence_kwargs = {"trace": evidence_trace} if trace is not None else {}
         evidence_mode, evidence, images = self.evidence_pipeline(
             docs, **evidence_kwargs

@@ -197,6 +197,24 @@ def _drain(generator):
             return outputs, stopped.value
 
 
+class BrokenScopedTrace:
+    def __init__(self):
+        self.events = []
+        self.scope_calls = []
+
+    def scoped(self, **context):
+        self.scope_calls.append(context)
+        raise RuntimeError("trace scope unavailable")
+
+    def update(self, mapping=None, **fields):
+        if mapping is not None:
+            fields = {**mapping, **fields}
+        self.events.append(("update", fields))
+
+    def record(self, stage, **fields):
+        self.events.append((stage, fields))
+
+
 def test_normal_qa_stream_hands_same_trace_through_retrieval_and_evidence():
     class Retriever:
         def __init__(self):
@@ -350,6 +368,232 @@ def test_extra_table_trace_reports_the_final_authorized_ui_ids(monkeypatch):
     assert [doc.doc_id for doc in result] == ["selected-text", "selected-table"]
     assert trace.to_dict()["final_ui_chunk_ids"] == ["selected-text", "selected-table"]
     assert "unselected" not in str(trace.to_dict()["final_ui_chunk_ids"])
+
+
+def test_extra_table_trace_never_records_foreign_candidates_after_zero_scope_hits(
+    monkeypatch,
+):
+    selected = RetrievedDocument(
+        id_="selected-text",
+        text="Table 4 summarizes the selected source.",
+        metadata={"file_id": "source-a", "file_name": "guide.md", "page_label": "4"},
+    )
+    foreign_table = Document(
+        id_="foreign-table",
+        text="A table from a different source.",
+        metadata={
+            "file_id": "source-b",
+            "file_name": "guide.md",
+            "page_label": "4",
+            "type": "table",
+        },
+    )
+    service = type(
+        "Service",
+        (),
+        {
+            "search": lambda self, query, **kwargs: [selected],
+            "chunk_ids_for_sources": lambda self, ids: [
+                "selected-text",
+                "selected-table",
+            ],
+        },
+    )()
+
+    class Embedding(BaseEmbeddings):
+        def run(self, text, *args, **kwargs):
+            return [DocumentWithEmbedding(embedding=[1.0, 0.0])]
+
+    class VectorStore(BaseVectorStore):
+        def __init__(self):
+            self.query_scopes = []
+
+        def add(self, embeddings, metadatas=None, ids=None):
+            return ids or []
+
+        def delete(self, ids, **kwargs):
+            return None
+
+        def query(self, embedding, top_k=1, ids=None, **kwargs):
+            self.query_scopes.append(ids)
+            if ids is None:
+                return [], [0.9], ["foreign-table"]
+            return [], [], []
+
+        def drop(self):
+            return None
+
+    class DocumentStore(BaseDocumentStore):
+        supports_lexical_search = False
+
+        def __init__(self):
+            self.docs = {"foreign-table": foreign_table}
+
+        def add(self, docs, ids=None, **kwargs):
+            return None
+
+        def get(self, ids):
+            requested = [ids] if isinstance(ids, str) else list(ids)
+            return [self.docs[doc_id] for doc_id in requested if doc_id in self.docs]
+
+        def get_all(self):
+            return list(self.docs.values())
+
+        def count(self):
+            return len(self.docs)
+
+        def query(self, query, top_k=10, doc_ids=None):
+            return []
+
+        def delete(self, ids):
+            return None
+
+        def drop(self):
+            return None
+
+    vector_store = VectorStore()
+    extra_retrieval = VectorRetrieval(
+        vector_store=vector_store,
+        doc_store=DocumentStore(),
+        embedding=Embedding(),
+        retrieval_mode="vector",
+    )
+    monkeypatch.setattr(
+        "ktem.index.file.pipelines.create_file_knowledge_service",
+        lambda **kwargs: service,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "ktem.index.file.pipelines.VectorRetrieval",
+        lambda **kwargs: extra_retrieval,
+    )
+    pipeline = DocumentRetrievalPipeline(
+        embedding=Embedding(),
+        Source=object(),
+        Index=object(),
+        VS=vector_store,
+        DS=DocumentStore(),
+        get_extra_table=True,
+    )
+    trace = RetrievalTrace()
+
+    result = pipeline.run(text="question", doc_ids=["source-a"], trace=trace)
+
+    snapshot = trace.to_dict()
+    recall_events = [
+        event for event in snapshot["events"] if event["stage"] == "recall_attempt"
+    ]
+    traced_candidate_ids = [
+        candidate["id"]
+        for event in recall_events
+        for branch in ("vector_candidates", "lexical_candidates")
+        for candidate in event.get(branch, [])
+    ]
+    final_ui_events = [
+        event for event in snapshot["events"] if event["stage"] == "final_ui"
+    ]
+    assert [doc.doc_id for doc in result] == ["selected-text"]
+    assert "foreign-table" not in traced_candidate_ids
+    assert all(
+        doc_id in {"selected-text", "selected-table"} for doc_id in traced_candidate_ids
+    )
+    assert vector_store.query_scopes == [["selected-text", "selected-table"]]
+    assert final_ui_events[-1]["ids"] == ["selected-text"]
+    assert snapshot["final_ui_chunk_ids"] == ["selected-text"]
+
+
+def test_broken_scoped_trace_does_not_interrupt_qa_stream_or_evidence_handoff():
+    class Retriever:
+        def __call__(self, **kwargs):
+            kwargs["trace"].record("retriever_used", ids=["usable"])
+            return [
+                RetrievedDocument(id_="usable", text="usable evidence", metadata={})
+            ]
+
+        def generate_relevant_scores(self, query, documents):
+            return documents
+
+    trace = BrokenScopedTrace()
+    pipeline = FullQAPipeline(
+        retrievers=[Retriever()],
+        evidence_pipeline=PrepareEvidencePipeline(
+            max_context_length=200, token_counter=len
+        ),
+        answering_pipeline=FakeAnsweringPipeline(),
+    )
+    pipeline._prepare_child = lambda child, name: child
+
+    outputs, answer = _drain(
+        pipeline.stream("question", "conversation", [], trace=trace)
+    )
+
+    assert answer.text == "answer"
+    assert outputs and all(isinstance(item, Document) for item in outputs)
+    assert "retriever_used" in [stage for stage, _ in trace.events]
+    assert "context" in [stage for stage, _ in trace.events]
+    assert trace.scope_calls == [
+        {"retriever_index": 0, "retriever_name": "Retriever", "query_kind": "main"},
+        {"query_kind": "main"},
+    ]
+
+
+def test_broken_scoped_trace_does_not_skip_extra_table_retrieval(monkeypatch):
+    selected = RetrievedDocument(
+        id_="selected-text",
+        text="Table 4 summarizes the selected source.",
+        metadata={"file_id": "source-a", "file_name": "guide.md", "page_label": "4"},
+    )
+    selected_table = RetrievedDocument(
+        id_="selected-table",
+        text="Selected table contents.",
+        metadata={"file_id": "source-a", "type": "table", "page_label": "4"},
+    )
+    service = type(
+        "Service",
+        (),
+        {
+            "search": lambda self, query, **kwargs: [selected],
+            "chunk_ids_for_sources": lambda self, ids: [
+                "selected-text",
+                "selected-table",
+            ],
+        },
+    )()
+
+    class ExtraRetriever:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return [selected_table]
+
+    extra_retriever = ExtraRetriever()
+    monkeypatch.setattr(
+        "ktem.index.file.pipelines.create_file_knowledge_service",
+        lambda **kwargs: service,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "ktem.index.file.pipelines.VectorRetrieval",
+        lambda **kwargs: extra_retriever,
+    )
+    pipeline = DocumentRetrievalPipeline(
+        embedding=None,
+        Source=object(),
+        Index=object(),
+        VS=object(),
+        DS=object(),
+        get_extra_table=True,
+    )
+    trace = BrokenScopedTrace()
+
+    result = pipeline.run(text="question", doc_ids=["source-a"], trace=trace)
+
+    assert [doc.doc_id for doc in result] == ["selected-text", "selected-table"]
+    assert len(extra_retriever.calls) == 1
+    assert extra_retriever.calls[0]["trace"] is trace
+    assert trace.scope_calls == [{"query_kind": "extra_table"}]
 
 
 def test_broken_trace_does_not_interrupt_context_or_qa_retrieval():

@@ -42,7 +42,7 @@ from kotaemon.indices.ingests.files import (
 )
 from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
 from kotaemon.indices.knowledge.metadata import normalize_knowledge_metadata
-from kotaemon.indices.knowledge.retrieval.trace import trace_event
+from kotaemon.indices.knowledge.retrieval.trace import trace_event, trace_scoped
 from kotaemon.indices.rankings import BaseReranking, LLMReranking, LLMTrulensScoring
 from kotaemon.indices.splitters import BaseSplitter, TokenSplitter
 
@@ -206,13 +206,12 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
         ]
         if queries:
             try:
-                extra_trace = trace
-                if trace is not None and callable(getattr(trace, "scoped", None)):
-                    extra_trace = trace.scoped(query_kind="extra_table")
+                extra_trace = trace_scoped(trace, query_kind="extra_table")
                 extra_kwargs = dict(
                     text="",
                     top_k=50,
                     scope=chunk_ids,
+                    fallback_scope=chunk_ids,
                     where=queries[0] if len(queries) == 1 else {"$or": queries},
                 )
                 if trace is not None:

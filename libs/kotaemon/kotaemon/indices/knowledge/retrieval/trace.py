@@ -303,4 +303,18 @@ def trace_event(trace: Any, stage: str, **fields: Any) -> None:
         logger.exception("Could not record optional retrieval trace stage %s", stage)
 
 
-__all__ = ["RetrievalTrace", "trace_event", "trace_update"]
+def trace_scoped(trace: Any, **context: Any) -> Any:
+    """Return a context-tagged trace writer, falling back to the original sink."""
+    if trace is None:
+        return None
+    try:
+        scoped = getattr(trace, "scoped", None)
+        if callable(scoped):
+            result = scoped(**context)
+            return trace if result is None else result
+    except Exception:
+        logger.exception("Could not scope optional retrieval trace")
+    return trace
+
+
+__all__ = ["RetrievalTrace", "trace_event", "trace_scoped", "trace_update"]

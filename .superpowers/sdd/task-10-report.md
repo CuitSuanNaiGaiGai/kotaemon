@@ -79,6 +79,41 @@ Modified implementation and test files:
   normalizing NaN to `null`. A deferred group-cap document selected to fill
   `top_k` is recorded as selected, not excluded; these two tests passed 2/2 in
   4.65s.
+- The full service-to-context/citation chain, JSON-safe serialization and
+  redaction, concurrent event histories, backend status/error reporting,
+  diversity exclusions, zero-hit fallback-attempt retention, normal and
+  decomposed stream handoffs, and the original extra-table final-ID test were
+  first recorded as passing after implementation was present. The handoff has
+  no captured pre-implementation RED for those groups, so this report does not
+  claim one.
+- Review follow-up: added a selected-scope extra-table regression using the
+  actual `VectorRetrieval` class. The direct RED run was:
+
+  ```text
+  uv run pytest libs/ktem/ktem_tests/test_knowledge_trace_integration.py -k foreign_candidates_after_zero_scope_hits -q
+  1 failed, 11 deselected in 6.58s
+  ```
+
+  The failing assertion was `assert "foreign-table" not in ["foreign-table"]`:
+  the trace contained that candidate after the scoped query retried globally,
+  although the file pipeline later filtered it from UI results. Passing
+  `fallback_scope=chunk_ids` keeps the zero-hit attempt
+  within the selected chunk allowlist. The GREEN version passes and confirms
+  only the selected scope reaches the vector backend and final UI trace.
+- Review follow-up: custom sinks whose `scoped()` method raises now fall back
+  to the original sink through `trace_scoped`. The first focused RED run was:
+
+  ```text
+  uv run pytest libs/ktem/ktem_tests/test_knowledge_trace_integration.py -k 'foreign_candidates_after_zero_scope_hits or broken_scoped_trace' -q
+  3 failed, 9 deselected in 7.24s
+  ```
+
+  The normal QA stream raised
+  `RuntimeError: trace scope unavailable`, and extra-table retrieval silently
+  stopped. The fallback-candidate test's more specific RED above confirmed the
+  leaked foreign ID. After adding the helper at all Simple QA retrieval and
+  evidence handoffs and at extra-table retrieval, the same selection passed
+  3/3 in 6.39s.
 
 ## Verification
 
@@ -98,7 +133,7 @@ uv run pytest \
   libs/kotaemon/tests/test_knowledge_trace.py \
   libs/ktem/ktem_tests/test_knowledge_trace_integration.py -q
 
-120 passed in 7.79s
+123 passed in 5.79s
 ```
 
 Static checks on all touched Python files:
