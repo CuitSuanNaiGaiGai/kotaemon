@@ -108,11 +108,6 @@
           "id": "chunk-zhang-api",
           "score": 0.07106690545187015,
           "score_available": true
-        },
-        {
-          "id": "chunk-zhang-li-question",
-          "score": 0.0,
-          "score_available": true
         }
       ],
       "lexical_candidates": [],
@@ -122,8 +117,7 @@
       "stage": "merged",
       "ids": [
         "chunk-zhang-rag",
-        "chunk-zhang-api",
-        "chunk-zhang-li-question"
+        "chunk-zhang-api"
       ]
     },
     {
@@ -131,27 +125,24 @@
       "excluded": [],
       "selected_ids": [
         "chunk-zhang-rag",
-        "chunk-zhang-api",
-        "chunk-zhang-li-question"
+        "chunk-zhang-api"
       ]
     },
     {
       "stage": "final",
       "ids": [
         "chunk-zhang-rag",
-        "chunk-zhang-api",
-        "chunk-zhang-li-question"
+        "chunk-zhang-api"
       ]
     },
     {
       "stage": "context",
       "chunk_ids": [
         "chunk-zhang-rag",
-        "chunk-zhang-api",
-        "chunk-zhang-li-question"
+        "chunk-zhang-api"
       ],
       "token_budget": 4096,
-      "tokens_used": 496
+      "tokens_used": 319
     }
   ],
   "original_query": "张三实习期间做了什么工作？",
@@ -248,11 +239,6 @@
           "id": "chunk-zhang-api",
           "score": 0.07106690545187015,
           "score_available": true
-        },
-        {
-          "id": "chunk-zhang-li-question",
-          "score": 0.0,
-          "score_available": true
         }
       ],
       "lexical_candidates": [],
@@ -265,47 +251,41 @@
     "chunk-zhang-li-question",
     "chunk-zhang-rag"
   ],
-  "candidate_k": 5,
+  "candidate_k": 2,
   "lexical_status": "not_used",
   "lexical_result_count": 0,
   "scope_fallback": false,
   "merged_ids": [
     "chunk-zhang-rag",
-    "chunk-zhang-api",
-    "chunk-zhang-li-question"
+    "chunk-zhang-api"
   ],
   "diversity_selected_ids": [
     "chunk-zhang-rag",
-    "chunk-zhang-api",
-    "chunk-zhang-li-question"
+    "chunk-zhang-api"
   ],
   "diversity": {
     "excluded": [],
     "selected_ids": [
       "chunk-zhang-rag",
-      "chunk-zhang-api",
-      "chunk-zhang-li-question"
+      "chunk-zhang-api"
     ]
   },
   "final_chunk_ids": [
     "chunk-zhang-rag",
-    "chunk-zhang-api",
-    "chunk-zhang-li-question"
+    "chunk-zhang-api"
   ],
   "context_chunk_ids": [
     "chunk-zhang-rag",
-    "chunk-zhang-api",
-    "chunk-zhang-li-question"
+    "chunk-zhang-api"
   ],
-  "context_tokens": 496,
+  "context_tokens": 319,
   "context_token_budget": 4096,
   "context": {
     "chunk_ids": [
       "chunk-zhang-rag",
-      "chunk-zhang-api",
-      "chunk-zhang-li-question"
+      "chunk-zhang-api"
     ],
     "token_budget": 4096,
-    "tokens_used": 496
+    "tokens_used": 319
   }
 }

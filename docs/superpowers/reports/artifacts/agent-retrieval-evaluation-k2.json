@@ -1,8 +1,8 @@
 {
-  "config_fingerprint": "6ba28c30261f3f5588e5fbb241244ec7c13015baea8c2ac1bd1c12984cb5b85c",
+  "config_fingerprint": "a3a197bbbea956400cda93ed15084c6b3e8f6198f743a92e1613063a9776d432",
   "baseline_config": {
     "backend": "DeterministicVectorStore cosine + InMemoryDocumentStore",
-    "candidate_k": 5,
+    "candidate_k": 2,
     "context_budget": 4096,
     "do_extend": false,
     "docstore_backend": "InMemoryDocumentStore",
@@ -16,12 +16,12 @@
     "rerankers": [],
     "retrieval_mode": "vector",
     "seed": 0,
-    "top_k": 5,
+    "top_k": 2,
     "vector_backend": "fixture deterministic cosine adapter"
   },
   "planned_config": {
     "backend": "DeterministicVectorStore cosine + InMemoryDocumentStore",
-    "candidate_k": 5,
+    "candidate_k": 2,
     "context_budget": 4096,
     "do_extend": false,
     "docstore_backend": "InMemoryDocumentStore",
@@ -35,41 +35,37 @@
     "rerankers": [],
     "retrieval_mode": "vector",
     "seed": 0,
-    "top_k": 5,
+    "top_k": 2,
     "vector_backend": "fixture deterministic cosine adapter"
   },
   "baseline": {
-    "k": 5,
+    "k": 2,
     "hit_at_k": 1.0,
-    "recall_at_k": 0.9333333333333332,
+    "recall_at_k": 0.7666666666666667,
     "mrr_at_k": 0.7,
-    "wrong_scope_at_k": 0.3076923076923077,
+    "wrong_scope_at_k": 0.3333333333333333,
     "judged_query_count": 5,
     "scope_labeled_query_count": 3,
     "per_query": [
       {
         "id": "zhang-internship",
         "hit_at_k": 1.0,
-        "recall_at_k": 1.0,
+        "recall_at_k": 0.5,
         "reciprocal_rank_at_k": 0.5,
         "result_ids": [
           "chunk-li-zhang-question",
-          "chunk-zhang-rag",
-          "chunk-li-wang-question",
-          "chunk-zhang-api",
-          "chunk-zhang-li-question"
+          "chunk-zhang-rag"
         ],
         "relevant_retrieved_ids": [
-          "chunk-zhang-rag",
-          "chunk-zhang-api"
+          "chunk-zhang-rag"
         ],
         "first_relevant_rank": 2,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
-        "wrong_scope_numerator": 2,
-        "wrong_scope_denominator": 5,
-        "wrong_scope_rate": 0.4
+        "wrong_scope_numerator": 1,
+        "wrong_scope_denominator": 2,
+        "wrong_scope_rate": 0.5
       },
       {
         "id": "li-frontend",
@@ -78,18 +74,17 @@
         "reciprocal_rank_at_k": 1.0,
         "result_ids": [
           "chunk-li-frontend",
-          "chunk-li-wang-question",
-          "chunk-li-zhang-question"
+          "chunk-li-wang-question"
         ],
         "relevant_retrieved_ids": [
           "chunk-li-frontend"
         ],
         "first_relevant_rank": 1,
-        "raw_result_count": 3,
-        "unique_result_count": 3,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
-        "wrong_scope_denominator": 3,
+        "wrong_scope_denominator": 2,
         "wrong_scope_rate": 0.0
       },
       {
@@ -99,41 +94,34 @@
         "reciprocal_rank_at_k": 0.5,
         "result_ids": [
           "chunk-li-wang-question",
-          "chunk-wang-automation",
-          "chunk-wang-team-tech",
-          "chunk-wang-li-question",
-          "chunk-li-zhang-question"
+          "chunk-wang-automation"
         ],
         "relevant_retrieved_ids": [
           "chunk-wang-automation"
         ],
         "first_relevant_rank": 2,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
-        "wrong_scope_numerator": 2,
-        "wrong_scope_denominator": 5,
-        "wrong_scope_rate": 0.4
+        "wrong_scope_numerator": 1,
+        "wrong_scope_denominator": 2,
+        "wrong_scope_rate": 0.5
       },
       {
         "id": "ambiguous-team",
         "hit_at_k": 1.0,
-        "recall_at_k": 0.6666666666666666,
+        "recall_at_k": 0.3333333333333333,
         "reciprocal_rank_at_k": 0.5,
         "result_ids": [
           "chunk-li-wang-question",
-          "chunk-wang-team-tech",
-          "chunk-zhang-rag",
-          "chunk-li-zhang-question",
-          "chunk-zhang-api"
+          "chunk-wang-team-tech"
         ],
         "relevant_retrieved_ids": [
-          "chunk-wang-team-tech",
-          "chunk-zhang-rag"
+          "chunk-wang-team-tech"
         ],
         "first_relevant_rank": 2,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
         "wrong_scope_denominator": 0,
@@ -146,17 +134,14 @@
         "reciprocal_rank_at_k": 1.0,
         "result_ids": [
           "chunk-legacy-api",
-          "chunk-legacy-token",
-          "chunk-zhang-li-question",
-          "chunk-zhang-rag",
-          "chunk-zhang-api"
+          "chunk-legacy-token"
         ],
         "relevant_retrieved_ids": [
           "chunk-legacy-api"
         ],
         "first_relevant_rank": 1,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
         "wrong_scope_denominator": 0,
@@ -165,11 +150,11 @@
     ]
   },
   "planned": {
-    "k": 5,
+    "k": 2,
     "hit_at_k": 1.0,
-    "recall_at_k": 0.9333333333333332,
+    "recall_at_k": 0.8666666666666668,
     "mrr_at_k": 0.8,
-    "wrong_scope_at_k": 0.18181818181818182,
+    "wrong_scope_at_k": 0.16666666666666666,
     "judged_query_count": 5,
     "scope_labeled_query_count": 3,
     "per_query": [
@@ -180,19 +165,18 @@
         "reciprocal_rank_at_k": 1.0,
         "result_ids": [
           "chunk-zhang-rag",
-          "chunk-zhang-api",
-          "chunk-zhang-li-question"
+          "chunk-zhang-api"
         ],
         "relevant_retrieved_ids": [
           "chunk-zhang-rag",
           "chunk-zhang-api"
         ],
         "first_relevant_rank": 1,
-        "raw_result_count": 3,
-        "unique_result_count": 3,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
-        "wrong_scope_denominator": 3,
+        "wrong_scope_denominator": 2,
         "wrong_scope_rate": 0.0
       },
       {
@@ -202,18 +186,17 @@
         "reciprocal_rank_at_k": 1.0,
         "result_ids": [
           "chunk-li-frontend",
-          "chunk-li-wang-question",
-          "chunk-li-zhang-question"
+          "chunk-li-wang-question"
         ],
         "relevant_retrieved_ids": [
           "chunk-li-frontend"
         ],
         "first_relevant_rank": 1,
-        "raw_result_count": 3,
-        "unique_result_count": 3,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
-        "wrong_scope_denominator": 3,
+        "wrong_scope_denominator": 2,
         "wrong_scope_rate": 0.0
       },
       {
@@ -223,41 +206,34 @@
         "reciprocal_rank_at_k": 0.5,
         "result_ids": [
           "chunk-li-wang-question",
-          "chunk-wang-automation",
-          "chunk-wang-team-tech",
-          "chunk-wang-li-question",
-          "chunk-li-zhang-question"
+          "chunk-wang-automation"
         ],
         "relevant_retrieved_ids": [
           "chunk-wang-automation"
         ],
         "first_relevant_rank": 2,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
-        "wrong_scope_numerator": 2,
-        "wrong_scope_denominator": 5,
-        "wrong_scope_rate": 0.4
+        "wrong_scope_numerator": 1,
+        "wrong_scope_denominator": 2,
+        "wrong_scope_rate": 0.5
       },
       {
         "id": "ambiguous-team",
         "hit_at_k": 1.0,
-        "recall_at_k": 0.6666666666666666,
+        "recall_at_k": 0.3333333333333333,
         "reciprocal_rank_at_k": 0.5,
         "result_ids": [
           "chunk-li-wang-question",
-          "chunk-wang-team-tech",
-          "chunk-zhang-rag",
-          "chunk-li-zhang-question",
-          "chunk-zhang-api"
+          "chunk-wang-team-tech"
         ],
         "relevant_retrieved_ids": [
-          "chunk-wang-team-tech",
-          "chunk-zhang-rag"
+          "chunk-wang-team-tech"
         ],
         "first_relevant_rank": 2,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
         "wrong_scope_denominator": 0,
@@ -270,17 +246,14 @@
         "reciprocal_rank_at_k": 1.0,
         "result_ids": [
           "chunk-legacy-api",
-          "chunk-legacy-token",
-          "chunk-zhang-li-question",
-          "chunk-zhang-rag",
-          "chunk-zhang-api"
+          "chunk-legacy-token"
         ],
         "relevant_retrieved_ids": [
           "chunk-legacy-api"
         ],
         "first_relevant_rank": 1,
-        "raw_result_count": 5,
-        "unique_result_count": 5,
+        "raw_result_count": 2,
+        "unique_result_count": 2,
         "duplicate_result_count": 0,
         "wrong_scope_numerator": 0,
         "wrong_scope_denominator": 0,
@@ -293,14 +266,11 @@
       "id": "zhang-internship",
       "result_ids": [
         "chunk-li-zhang-question",
-        "chunk-zhang-rag",
-        "chunk-li-wang-question",
-        "chunk-zhang-api",
-        "chunk-zhang-li-question"
+        "chunk-zhang-rag"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -313,12 +283,11 @@
       "id": "li-frontend",
       "result_ids": [
         "chunk-li-frontend",
-        "chunk-li-wang-question",
-        "chunk-li-zhang-question"
+        "chunk-li-wang-question"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -331,14 +300,11 @@
       "id": "wang-automation",
       "result_ids": [
         "chunk-li-wang-question",
-        "chunk-wang-automation",
-        "chunk-wang-team-tech",
-        "chunk-wang-li-question",
-        "chunk-li-zhang-question"
+        "chunk-wang-automation"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -351,14 +317,11 @@
       "id": "ambiguous-team",
       "result_ids": [
         "chunk-li-wang-question",
-        "chunk-wang-team-tech",
-        "chunk-zhang-rag",
-        "chunk-li-zhang-question",
-        "chunk-zhang-api"
+        "chunk-wang-team-tech"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -371,14 +334,11 @@
       "id": "legacy-source",
       "result_ids": [
         "chunk-legacy-api",
-        "chunk-legacy-token",
-        "chunk-zhang-li-question",
-        "chunk-zhang-rag",
-        "chunk-zhang-api"
+        "chunk-legacy-token"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -393,12 +353,11 @@
       "id": "zhang-internship",
       "result_ids": [
         "chunk-zhang-rag",
-        "chunk-zhang-api",
-        "chunk-zhang-li-question"
+        "chunk-zhang-api"
       ],
       "planner_status": "scoped",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -411,12 +370,11 @@
       "id": "li-frontend",
       "result_ids": [
         "chunk-li-frontend",
-        "chunk-li-wang-question",
-        "chunk-li-zhang-question"
+        "chunk-li-wang-question"
       ],
       "planner_status": "scoped",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -429,14 +387,11 @@
       "id": "wang-automation",
       "result_ids": [
         "chunk-li-wang-question",
-        "chunk-wang-automation",
-        "chunk-wang-team-tech",
-        "chunk-wang-li-question",
-        "chunk-li-zhang-question"
+        "chunk-wang-automation"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -449,14 +404,11 @@
       "id": "ambiguous-team",
       "result_ids": [
         "chunk-li-wang-question",
-        "chunk-wang-team-tech",
-        "chunk-zhang-rag",
-        "chunk-li-zhang-question",
-        "chunk-zhang-api"
+        "chunk-wang-team-tech"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -469,14 +421,11 @@
       "id": "legacy-source",
       "result_ids": [
         "chunk-legacy-api",
-        "chunk-legacy-token",
-        "chunk-zhang-li-question",
-        "chunk-zhang-rag",
-        "chunk-zhang-api"
+        "chunk-legacy-token"
       ],
       "planner_status": "global",
       "fallback_reason": null,
-      "candidate_k": 5,
+      "candidate_k": 2,
       "vector_statuses": [
         "available"
       ],
@@ -591,18 +540,18 @@
   },
   "observed_candidate_counts": {
     "baseline": [
-      5,
-      5,
-      5,
-      5,
-      5
+      2,
+      2,
+      2,
+      2,
+      2
     ],
     "planned": [
-      5,
-      5,
-      5,
-      5,
-      5
+      2,
+      2,
+      2,
+      2,
+      2
     ]
   },
   "trace_artifact": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace.json",

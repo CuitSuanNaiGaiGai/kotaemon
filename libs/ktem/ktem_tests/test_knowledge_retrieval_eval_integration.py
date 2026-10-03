@@ -283,13 +283,13 @@ def _make_indexed_fixture():
     }
 
 
-def _make_service(*, planner, fixture_state):
+def _make_service(*, planner, fixture_state, top_k):
     retriever = VectorRetrieval(
         vector_store=fixture_state["vector_store"],
         doc_store=fixture_state["docstore"],
         embedding=fixture_state["embedding"],
         retrieval_mode="vector",
-        top_k=2,
+        top_k=top_k,
         first_round_top_k_mult=1,
         rerankers=[],
         max_per_parent_or_section=None,
@@ -349,11 +349,13 @@ def _run_empty_allowlist_parity(baseline_service, planned_service, fixture_state
 
 def _run_synthetic_comparison(artifact_dir: Path | None = None):
     fixture_state = _make_indexed_fixture()
+    top_k = 5
     baseline_service = _make_service(
-        planner=IdentityGlobalPlanner(), fixture_state=fixture_state
+        planner=IdentityGlobalPlanner(), fixture_state=fixture_state, top_k=top_k
     )
-    planned_service = _make_service(planner=QueryPlanner(), fixture_state=fixture_state)
-    top_k = 2
+    planned_service = _make_service(
+        planner=QueryPlanner(), fixture_state=fixture_state, top_k=top_k
+    )
     candidate_k = top_k
     rerankers: list[str] = []
     shared_config = {
@@ -444,6 +446,7 @@ def _run_synthetic_comparison(artifact_dir: Path | None = None):
 
     trace_snapshot = zhang_trace.to_dict()
     assert trace_snapshot["original_query"] == "张三实习期间做了什么工作？"
+    assert trace_snapshot["plan"]["semantic_query"] == trace_snapshot["original_query"]
     assert trace_snapshot["plan"]["source_ids"] == ["source-zhang"]
     assert trace_snapshot["source_scope"]["mandatory_ids"] == [
         "source-legacy",
@@ -514,12 +517,17 @@ def test_synthetic_baseline_and_planned_retrieval_share_one_fixture_and_config()
 
     assert fixture_state["vector_store"].add_calls == 1
     assert len(fixture_state["documents"]) == 11
-    assert observed_counts == {"baseline": [2] * 5, "planned": [2] * 5}
+    assert len(comparison.baseline.per_query) == 5
+    assert len(comparison.planned.per_query) == 5
+    assert len(comparison.baseline_observations) == 5
+    assert len(comparison.planned_observations) == 5
+    assert observed_counts == {"baseline": [5] * 5, "planned": [5] * 5}
     assert all(
-        observation.candidate_k == 2
+        observation.candidate_k == 5
         for observation in comparison.baseline_observations
         + comparison.planned_observations
     )
+    assert all(trace.to_dict()["candidate_k"] == 5 for trace in traces.values())
     assert (
         comparison.baseline_config["fixture_sha256"]
         == comparison.planned_config["fixture_sha256"]
@@ -528,6 +536,10 @@ def test_synthetic_baseline_and_planned_retrieval_share_one_fixture_and_config()
         comparison.baseline_config["candidate_k"]
         == comparison.planned_config["candidate_k"]
     )
+    assert comparison.baseline_config["top_k"] == 5
+    assert comparison.baseline_config["candidate_k"] == 5
+    assert comparison.planned_config["top_k"] == 5
+    assert comparison.planned_config["candidate_k"] == 5
     assert comparison.baseline_config["max_per_parent_or_section"] is None
     assert comparison.baseline_config["mmr"] is False
     assert comparison.baseline_config["planner"] != comparison.planned_config["planner"]
@@ -543,8 +555,16 @@ def test_synthetic_baseline_and_planned_retrieval_share_one_fixture_and_config()
     assert planned["li-frontend"].wrong_scope_rate == 0
     # The current deterministic planner does not resolve this wording; retain
     # its global result and expose the observed cross-source distractor.
-    assert planned["wang-automation"].wrong_scope_rate == 0.5
+    assert planned["wang-automation"].wrong_scope_rate == 0.4
     assert comparison.planned.recall_at_k >= comparison.baseline.recall_at_k
+    assert comparison.baseline.hit_at_k == comparison.planned.hit_at_k == 1.0
+    assert comparison.baseline.recall_at_k == comparison.planned.recall_at_k
+    assert round(comparison.baseline.mrr_at_k, 4) == 0.7
+    assert round(comparison.planned.mrr_at_k, 4) == 0.8
+    assert round(comparison.baseline.wrong_scope_at_k, 4) == round(4 / 13, 4)
+    assert round(comparison.planned.wrong_scope_at_k, 4) == round(2 / 11, 4)
+    assert comparison.planned.mrr_at_k > comparison.baseline.mrr_at_k
+    assert comparison.planned.wrong_scope_at_k < comparison.baseline.wrong_scope_at_k
     assert planned["ambiguous-team"].result_ids == baseline["ambiguous-team"].result_ids
     assert planned["legacy-source"].result_ids == baseline["legacy-source"].result_ids
 
@@ -567,7 +587,9 @@ def test_synthetic_baseline_and_planned_retrieval_share_one_fixture_and_config()
 
 def test_explicit_empty_allowlist_does_not_query_vector_store():
     fixture_state = _make_indexed_fixture()
-    service = _make_service(planner=QueryPlanner(), fixture_state=fixture_state)
+    service = _make_service(
+        planner=QueryPlanner(), fixture_state=fixture_state, top_k=5
+    )
     trace = RetrievalTrace()
     before = len(fixture_state["vector_store"].query_log)
 
