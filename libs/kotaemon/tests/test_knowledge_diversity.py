@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Union
 
+import pytest
 from llama_index.core.vector_stores import (
     FilterOperator,
     MetadataFilter,
@@ -332,6 +333,37 @@ def test_thumbnail_metadata_filter_failure_keeps_safe_text_result():
 
     assert [doc.doc_id for doc in result] == ["text"]
     assert result[0].text == "visible evidence"
+    assert result[0].metadata.get("image_origin") is None
+
+
+@pytest.mark.parametrize(
+    ("text_source_id", "thumbnail_source_id"),
+    [(None, "other-source"), ("source-a", None), (None, None)],
+)
+def test_linked_thumbnail_requires_confirmed_source_identity(
+    text_source_id, thumbnail_source_id
+):
+    text_metadata = {"thumbnail_doc_id": "thumb"}
+    thumbnail_metadata = {"type": "thumbnail", "image_origin": "unverified-image"}
+    if text_source_id is not None:
+        text_metadata["document_id"] = text_source_id
+    if thumbnail_source_id is not None:
+        thumbnail_metadata["file_id"] = thumbnail_source_id
+    text = make_doc("text", "citation-ready source evidence", **text_metadata)
+    thumbnail = make_doc("thumb", "", **thumbnail_metadata)
+    pipeline = VectorRetrieval(
+        vector_store=FakeVectorStore(["text"]),
+        doc_store=FakeDocumentStore([text, thumbnail]),
+        embedding=FakeEmbedding(),
+        retrieval_mode="vector",
+        max_per_parent_or_section=None,
+    )
+
+    result = pipeline(text="question", top_k=1, scope=["text", "thumb"])
+
+    assert [doc.doc_id for doc in result] == ["text"]
+    assert result[0].text == "citation-ready source evidence"
+    assert result[0].metadata.get("type") is None
     assert result[0].metadata.get("image_origin") is None
 
 

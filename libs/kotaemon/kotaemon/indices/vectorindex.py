@@ -683,9 +683,9 @@ class VectorRetrieval(BaseRetrieval):
                 "document_id"
             ) or thumbnail_doc.metadata.get("file_id")
             if (
-                text_file_id is not None
-                and thumbnail_file_id is not None
-                and text_file_id != thumbnail_file_id
+                text_file_id is None
+                or thumbnail_file_id is None
+                or str(text_file_id) != str(thumbnail_file_id)
             ):
                 continue
 
