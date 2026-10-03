@@ -55,7 +55,7 @@ exit 0
 
 - The local review-draft API does not create query-linked evidence anchors; `anchors.jsonl` is empty until reviewed questions and spans exist.
 - The production CLI that enforces containment under the ignored `local/draft/` tree is outside Task 2. This API writes only beneath the explicit `output_dir` argument, and tests use temporary directories.
-- DOCX parsing uses the local fallback in this environment and requires human review of paragraph-level evidence granularity.
+- DOCX parsing uses the local fallback in this environment, which provides document-level granularity and requires human review because it coalesces paragraphs.
 - The prohibited `libs/kotaemon/tests/fixtures/knowledge_eval/local/sources/` tree was not accessed; all ingestion tests use generated temporary files.
 
 ## GPT-6 Sol Medium review follow-up
