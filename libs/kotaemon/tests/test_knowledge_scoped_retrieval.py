@@ -6,7 +6,13 @@ from types import SimpleNamespace
 from typing import Union
 
 import pytest
-from llama_index.core.vector_stores import VectorStoreQuery
+from llama_index.core.vector_stores import (
+    FilterCondition,
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+    VectorStoreQuery,
+)
 
 from kotaemon.base import Document, DocumentWithEmbedding
 from kotaemon.embeddings import BaseEmbeddings
@@ -336,6 +342,40 @@ def test_zero_hit_retry_uses_only_the_callers_visible_chunk_ids():
     assert trace["candidate_k"] == 50
 
 
+@pytest.mark.parametrize("mode", ["vector", "text", "hybrid"])
+def test_zero_hit_retry_without_a_separate_allowlist_runs_one_global_retry(mode):
+    global_doc = make_doc("global-hit")
+    vector = FakeVectorStore(
+        {
+            ("planned",): ([], [], []),
+            None: ([], [0.8], ["global-hit"]),
+        }
+    )
+    store = FakeDocumentStore([global_doc], lexical=[global_doc])
+    trace = {}
+
+    result = make_retriever(vector, store, retrieval_mode=mode)(
+        text="question", scope=["planned"], trace=trace
+    )
+
+    assert [doc.doc_id for doc in result] == ["global-hit"]
+    assert trace["scope_fallback"] is True
+    assert trace["scope_fallback_reason"] == "zero_scoped_hits"
+    assert trace["scope_status"] == "fallback"
+    assert trace["scope_ids"] is None
+    if mode == "text":
+        assert vector.calls == []
+    else:
+        assert [call["ids"] for call in vector.calls] == [["planned"], None]
+    if mode == "vector":
+        assert store.query_calls == []
+    else:
+        assert [call["doc_ids"] for call in store.query_calls] == [
+            ["planned"],
+            None,
+        ]
+
+
 def test_empty_caller_visibility_never_retries_as_global():
     vector = FakeVectorStore({("planned",): ([], [], [])})
     store = FakeDocumentStore()
@@ -348,6 +388,305 @@ def test_empty_caller_visibility_never_retries_as_global():
     assert result == []
     assert vector.calls == []
     assert trace["scope_fallback"] is False
+
+
+def test_zero_hit_retry_keeps_explicit_metadata_filters():
+    planned_rejected = make_doc("planned-rejected", file_id="source-b")
+    global_allowed = make_doc("global-allowed", file_id="source-a")
+    global_rejected = make_doc("global-rejected", file_id="source-b")
+    vector = FakeVectorStore(
+        {
+            ("planned",): ([], [0.9], ["planned-rejected"]),
+            None: (
+                [],
+                [0.8, 0.7],
+                ["global-allowed", "global-rejected"],
+            ),
+        }
+    )
+    store = FakeDocumentStore([planned_rejected, global_allowed, global_rejected])
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="file_id",
+                value=["source-a"],
+                operator=FilterOperator.IN,
+            )
+        ]
+    )
+    trace = {}
+
+    result = make_retriever(vector, store, retrieval_mode="vector")(
+        text="question", scope=["planned"], filters=filters, trace=trace
+    )
+
+    assert [doc.doc_id for doc in result] == ["global-allowed"]
+    assert trace["scope_fallback"] is True
+    assert [call["ids"] for call in vector.calls] == [["planned"], None]
+    assert all(call["filters"] is filters for call in vector.calls)
+
+
+def test_metadata_filters_are_enforced_when_both_recall_backends_ignore_them():
+    allowed = make_doc("allowed", file_id="source-a")
+    rejected = make_doc("rejected", file_id="source-b")
+    vector = FakeVectorStore({None: ([], [0.9, 0.8], ["allowed", "rejected"])})
+    store = FakeDocumentStore([allowed, rejected], lexical=[rejected, allowed])
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="file_id",
+                value=["source-a"],
+                operator=FilterOperator.IN,
+            )
+        ],
+        condition=FilterCondition.OR,
+    )
+
+    result = make_retriever(vector, store, retrieval_mode="hybrid")(
+        text="question", filters=filters
+    )
+
+    assert [doc.doc_id for doc in result] == ["allowed"]
+
+
+@pytest.mark.parametrize(
+    ("condition", "expected_ids"),
+    [
+        (FilterCondition.AND, ["both"]),
+        (FilterCondition.OR, ["both", "file-only", "type-only"]),
+    ],
+)
+def test_metadata_filter_group_condition_is_enforced(condition, expected_ids):
+    docs = [
+        make_doc("both", file_id="source-a", source_type="wiki"),
+        make_doc("file-only", file_id="source-a", source_type="pdf"),
+        make_doc("type-only", file_id="source-b", source_type="wiki"),
+        make_doc("neither", file_id="source-b", source_type="pdf"),
+    ]
+    vector = FakeVectorStore(
+        {None: ([], [0.9, 0.8, 0.7, 0.6], [doc.doc_id for doc in docs])}
+    )
+    store = FakeDocumentStore(docs)
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(key="file_id", value="source-a"),
+            MetadataFilter(key="source_type", value="wiki"),
+        ],
+        condition=condition,
+    )
+
+    result = make_retriever(vector, store, retrieval_mode="vector")(
+        text="question", filters=filters
+    )
+
+    assert [doc.doc_id for doc in result] == expected_ids
+
+
+def test_metadata_filter_is_reapplied_after_reranker_output():
+    allowed = make_doc("allowed", file_id="source-a")
+    rejected = make_doc("rejected", file_id="source-b")
+    vector = FakeVectorStore({None: ([], [0.9], ["allowed"])})
+    store = FakeDocumentStore([allowed, rejected])
+    reranker = CapturingReranker(output=[rejected, allowed])
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="file_id",
+                value=["source-a"],
+                operator=FilterOperator.IN,
+            )
+        ],
+        condition=FilterCondition.OR,
+    )
+
+    result = make_retriever(
+        vector, store, retrieval_mode="vector", rerankers=[reranker]
+    )(text="question", filters=filters)
+
+    assert [doc.doc_id for doc in result] == ["allowed"]
+
+
+def test_where_and_or_eq_in_are_enforced_after_vector_retrieval():
+    report_page = make_doc("report-page", file_name="report.pdf", page_label="1")
+    notes_page = make_doc("notes-page", file_name="notes.pdf", page_label="2")
+    rejected_page = make_doc("rejected-page", file_name="report.pdf", page_label="3")
+    vector = FakeVectorStore(
+        {
+            None: (
+                [],
+                [0.9, 0.8, 0.7],
+                ["report-page", "notes-page", "rejected-page"],
+            )
+        }
+    )
+    store = FakeDocumentStore([report_page, notes_page, rejected_page])
+    where = {
+        "$or": [
+            {
+                "$and": [
+                    {"file_name": {"$eq": "report.pdf"}},
+                    {"page_label": {"$in": ["1"]}},
+                ]
+            },
+            {
+                "$and": [
+                    {"file_name": {"$eq": "notes.pdf"}},
+                    {"page_label": {"$eq": "2"}},
+                ]
+            },
+        ]
+    }
+
+    result = make_retriever(vector, store, retrieval_mode="vector")(
+        text="question", where=where
+    )
+
+    assert [doc.doc_id for doc in result] == ["report-page", "notes-page"]
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"file_id": {"$ne": "source-a"}},
+        {"$not": [{"file_id": {"$eq": "source-a"}}]},
+    ],
+)
+def test_unsupported_where_operations_fail_closed_before_retrieval(constraint):
+    vector = FakeVectorStore()
+    store = FakeDocumentStore()
+    embedding = FakeEmbedding()
+
+    with pytest.raises(ValueError, match="Unsupported metadata filter"):
+        make_retriever(vector, store, embedding, retrieval_mode="vector")(
+            text="question", where=constraint
+        )
+
+    assert vector.calls == []
+    assert embedding.calls == 0
+
+
+def test_unsupported_metadata_filter_operator_fails_closed():
+    vector = FakeVectorStore()
+    store = FakeDocumentStore()
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(key="file_id", value="source-a", operator=FilterOperator.NE)
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Unsupported metadata filter"):
+        make_retriever(vector, store, retrieval_mode="vector")(
+            text="question", filters=filters
+        )
+
+    assert vector.calls == []
+
+
+def test_lexical_status_is_empty_when_all_lexical_hits_fail_metadata_filter():
+    allowed = make_doc("allowed", file_id="source-a")
+    rejected = make_doc("rejected", file_id="source-b")
+    vector = FakeVectorStore({None: ([], [0.9], ["allowed"])})
+    store = FakeDocumentStore([allowed, rejected], lexical=[rejected])
+    trace = {}
+    filters = MetadataFilters(
+        filters=[
+            MetadataFilter(
+                key="file_id",
+                value=["source-a"],
+                operator=FilterOperator.IN,
+            )
+        ],
+        condition=FilterCondition.OR,
+    )
+
+    result = make_retriever(vector, store, retrieval_mode="hybrid")(
+        text="question", filters=filters, trace=trace
+    )
+
+    assert [doc.doc_id for doc in result] == ["allowed"]
+    assert trace["lexical_status"] == "empty"
+    assert trace["lexical_result_count"] == 0
+
+
+def test_out_of_scope_thumbnail_link_is_not_fetched_or_returned():
+    text = make_doc(
+        "text-chunk",
+        file_id="source-a",
+        thumbnail_doc_id="forged-thumbnail",
+    )
+    thumbnail = make_doc(
+        "forged-thumbnail",
+        type="thumbnail",
+        file_id="source-b",
+        image_origin="private-image-data",
+    )
+    vector = FakeVectorStore({("text-chunk",): ([], [0.9], ["text-chunk"])})
+    store = FakeDocumentStore([text, thumbnail])
+
+    result = make_retriever(vector, store, retrieval_mode="vector")(
+        text="question", scope=["text-chunk"]
+    )
+
+    assert [doc.doc_id for doc in result] == ["text-chunk"]
+    assert all("forged-thumbnail" not in call for call in store.get_calls)
+    assert all(
+        doc.metadata.get("image_origin") != "private-image-data" for doc in result
+    )
+
+
+def test_cross_source_thumbnail_link_is_not_returned():
+    text = make_doc(
+        "text-chunk",
+        file_id="source-a",
+        thumbnail_doc_id="thumbnail-chunk",
+    )
+    thumbnail = make_doc(
+        "thumbnail-chunk",
+        type="thumbnail",
+        file_id="source-b",
+        image_origin="other-source-image",
+    )
+    vector = FakeVectorStore(
+        {("text-chunk", "thumbnail-chunk"): ([], [0.9], ["text-chunk"])}
+    )
+    store = FakeDocumentStore([text, thumbnail])
+
+    result = make_retriever(vector, store, retrieval_mode="vector")(
+        text="question", scope=["text-chunk", "thumbnail-chunk"]
+    )
+
+    assert [doc.doc_id for doc in result] == ["text-chunk"]
+    assert all(
+        doc.metadata.get("image_origin") != "other-source-image" for doc in result
+    )
+
+
+def test_thumbnail_link_inside_scope_and_same_source_replaces_text_result():
+    text = make_doc(
+        "text-chunk",
+        text="the original evidence",
+        file_id="source-a",
+        thumbnail_doc_id="thumbnail-chunk",
+    )
+    thumbnail = make_doc(
+        "thumbnail-chunk",
+        type="thumbnail",
+        file_id="source-a",
+        image_origin="image-data",
+    )
+    vector = FakeVectorStore(
+        {("text-chunk", "thumbnail-chunk"): ([], [0.9], ["text-chunk"])}
+    )
+    store = FakeDocumentStore([text, thumbnail])
+
+    result = make_retriever(vector, store, retrieval_mode="vector")(
+        text="question", scope=["text-chunk", "thumbnail-chunk"]
+    )
+
+    assert [doc.doc_id for doc in result] == ["text-chunk"]
+    assert result[0].metadata["type"] == "image"
+    assert result[0].metadata["image_origin"] == "image-data"
+    assert result[0].content == "the original evidence"
 
 
 def test_legacy_global_documents_without_canonical_metadata_remain_retrievable():

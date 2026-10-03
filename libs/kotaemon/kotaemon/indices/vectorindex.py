@@ -3,9 +3,16 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Optional, Sequence, cast
 
+from llama_index.core.vector_stores import (
+    FilterCondition,
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+)
 from theflow.settings import settings as flowsettings
 
 from kotaemon.base import BaseComponent, Document, RetrievedDocument
@@ -167,6 +174,117 @@ class VectorRetrieval(BaseRetrieval):
         return [document for document in documents if document.doc_id in allowed]
 
     @staticmethod
+    def _metadata_predicate(
+        filters: Any = None, where: Any = None
+    ) -> Callable[[Mapping[str, Any]], bool] | None:
+        """Build a fail-closed predicate for the supported metadata-filter subset."""
+
+        def unsupported(detail: str) -> ValueError:
+            return ValueError(f"Unsupported metadata filter: {detail}")
+
+        def combine(
+            predicates: list[Callable[[Mapping[str, Any]], bool]], condition: Any
+        ) -> Callable[[Mapping[str, Any]], bool]:
+            if not predicates:
+                raise unsupported("empty filter group")
+            if condition == FilterCondition.AND:
+                return lambda metadata: all(
+                    predicate(metadata) for predicate in predicates
+                )
+            if condition == FilterCondition.OR:
+                return lambda metadata: any(
+                    predicate(metadata) for predicate in predicates
+                )
+            raise unsupported(f"unknown condition {condition!r}")
+
+        def parse_llama_filters(
+            node: Any,
+        ) -> Callable[[Mapping[str, Any]], bool]:
+            if isinstance(node, MetadataFilter):
+                key = node.key
+                operator = node.operator
+                expected = node.value
+                if not isinstance(key, str) or not key:
+                    raise unsupported("metadata key must be a non-empty string")
+                if operator == FilterOperator.EQ:
+                    return (
+                        lambda metadata: key in metadata and metadata[key] == expected
+                    )
+                if operator == FilterOperator.IN:
+                    if not isinstance(expected, (list, tuple)):
+                        raise unsupported("IN requires a list of values")
+                    return lambda metadata: key in metadata and any(
+                        metadata[key] == value for value in expected
+                    )
+                raise unsupported(f"operator {operator!r}")
+
+            if isinstance(node, MetadataFilters):
+                return combine(
+                    [parse_llama_filters(child) for child in node.filters],
+                    node.condition,
+                )
+
+            raise unsupported(f"expected MetadataFilter(s), got {type(node).__name__}")
+
+        def parse_chroma_where(
+            node: Any,
+        ) -> Callable[[Mapping[str, Any]], bool]:
+            if not isinstance(node, Mapping) or not node:
+                raise unsupported("where must be a non-empty mapping")
+
+            if len(node) == 1:
+                operator, children = next(iter(node.items()))
+                if operator in {"$and", "$or"}:
+                    if not isinstance(children, (list, tuple)):
+                        raise unsupported(f"{operator} requires a list of filters")
+                    return combine(
+                        [parse_chroma_where(child) for child in children],
+                        (
+                            FilterCondition.AND
+                            if operator == "$and"
+                            else FilterCondition.OR
+                        ),
+                    )
+
+            if len(node) != 1:
+                raise unsupported("where clauses must use one explicit operator")
+            key, constraint = next(iter(node.items()))
+            if not isinstance(key, str) or not key or key.startswith("$"):
+                raise unsupported("metadata key must be a non-empty string")
+            if not isinstance(constraint, Mapping) or len(constraint) != 1:
+                raise unsupported(f"where clause for {key!r} must use one operator")
+            operator, expected = next(iter(constraint.items()))
+            if operator == "$eq":
+                return lambda metadata: key in metadata and metadata[key] == expected
+            if operator == "$in":
+                if not isinstance(expected, (list, tuple)):
+                    raise unsupported("$in requires a list of values")
+                return lambda metadata: key in metadata and any(
+                    metadata[key] == value for value in expected
+                )
+            raise unsupported(f"where operator {operator!r}")
+
+        predicates = []
+        if filters is not None:
+            predicates.append(parse_llama_filters(filters))
+        if where is not None:
+            predicates.append(parse_chroma_where(where))
+        if not predicates:
+            return None
+        return combine(predicates, FilterCondition.AND)
+
+    @staticmethod
+    def _filter_to_metadata(
+        documents: list[RetrievedDocument],
+        predicate: Callable[[Mapping[str, Any]], bool] | None,
+    ) -> list[RetrievedDocument]:
+        if predicate is None:
+            return documents
+        return [
+            document for document in documents if predicate(document.metadata or {})
+        ]
+
+    @staticmethod
     def _lexical_available(doc_store: BaseDocumentStore) -> bool:
         """Honor an explicit backend capability flag and retain legacy adapters."""
         capability = getattr(doc_store, "supports_lexical_search", None)
@@ -250,6 +368,14 @@ class VectorRetrieval(BaseRetrieval):
         if scope is None and legacy_doc_ids is not None:
             scope = legacy_doc_ids
 
+        metadata_filter = self._metadata_predicate(
+            filters=kwargs.get("filters"), where=kwargs.get("where")
+        )
+        if kwargs.get("where_document") is not None:
+            raise ValueError(
+                "Unsupported metadata filter: where_document is not supported"
+            )
+
         # ``scope`` is the planner's exact chunk scope. ``fallback_scope`` is the
         # caller-visible chunk allowlist. Even a global/ambiguous plan is restricted
         # to that allowlist when one was provided.
@@ -305,7 +431,7 @@ class VectorRetrieval(BaseRetrieval):
 
         def retrieve_candidates(
             query_scope: list[str] | None,
-        ) -> tuple[list[RetrievedDocument], str, dict[str, Exception]]:
+        ) -> tuple[list[RetrievedDocument], str, dict[str, Exception], int]:
             errors: dict[str, Exception] = {}
             vector_docs: list[RetrievedDocument] = []
             lexical_docs: list[RetrievedDocument] = []
@@ -319,14 +445,18 @@ class VectorRetrieval(BaseRetrieval):
                 except Exception as exc:
                     errors["vector"] = exc
                 return (
-                    self._filter_to_scope(vector_docs, query_scope),
+                    self._filter_to_metadata(
+                        self._filter_to_scope(vector_docs, query_scope),
+                        metadata_filter,
+                    ),
                     status,
                     errors,
+                    0,
                 )
 
             if self.retrieval_mode == "text":
                 if not lexical_available:
-                    return [], "unavailable", errors
+                    return [], "unavailable", errors, 0
                 try:
                     docs = self.doc_store.query(
                         query, top_k=candidate_k, doc_ids=query_scope
@@ -334,12 +464,15 @@ class VectorRetrieval(BaseRetrieval):
                     lexical_docs = [
                         RetrievedDocument(**doc.to_dict(), score=-1.0) for doc in docs
                     ]
-                    status = "available" if lexical_docs else "empty"
                 except Exception as exc:
                     errors["lexical"] = exc
                     status = "error"
                 lexical_docs = self._filter_to_scope(lexical_docs, query_scope)
-                return self._deduplicate_docs(lexical_docs), status, errors
+                lexical_docs = self._filter_to_metadata(lexical_docs, metadata_filter)
+                if status != "error":
+                    status = "available" if lexical_docs else "empty"
+                lexical_docs = self._deduplicate_docs(lexical_docs)
+                return lexical_docs, status, errors, len(lexical_docs)
 
             if self.retrieval_mode != "hybrid":
                 raise ValueError(f"Unknown retrieval mode: {self.retrieval_mode}")
@@ -368,7 +501,6 @@ class VectorRetrieval(BaseRetrieval):
                     lexical_docs = [
                         RetrievedDocument(**doc.to_dict(), score=-1.0) for doc in docs
                     ]
-                    status = "available" if lexical_docs else "empty"
                 except Exception as exc:
                     errors["lexical"] = exc
                     status = "error"
@@ -385,23 +517,31 @@ class VectorRetrieval(BaseRetrieval):
                 lexical_thread.join()
 
             lexical_docs = self._filter_to_scope(lexical_docs, query_scope)
+            lexical_docs = self._filter_to_metadata(lexical_docs, metadata_filter)
+            if lexical_available and "lexical" not in errors:
+                status = "available" if lexical_docs else "empty"
             vector_docs = self._filter_to_scope(vector_docs, query_scope)
+            vector_docs = self._filter_to_metadata(vector_docs, metadata_filter)
             merged = self._deduplicate_docs(lexical_docs + vector_docs)
-            return merged, status, errors
+            return merged, status, errors, len(lexical_docs)
 
-        result, lexical_status, branch_errors = retrieve_candidates(requested_scope)
+        result, lexical_status, branch_errors, lexical_result_count = (
+            retrieve_candidates(requested_scope)
+        )
         result = self._deduplicate_docs(self._filter_to_scope(result, requested_scope))
+        result = self._filter_to_metadata(result, metadata_filter)
 
-        fallback_ids: list[str] | None = None
-        if visible_scope is not None:
-            fallback_ids = visible_scope
+        # A missing caller allowlist means the caller has not supplied an
+        # additional visibility boundary, so a zero-hit planned scope may retry
+        # globally. An explicit empty allowlist returned above and never reaches
+        # this point.
+        fallback_ids = visible_scope
         should_retry = (
             scope is not None
             and not result
             and not branch_errors
-            and fallback_ids is not None
-            and bool(fallback_ids)
-            and set(requested_scope or ()) != set(fallback_ids)
+            and (fallback_ids is None or bool(fallback_ids))
+            and set(requested_scope or ()) != set(fallback_ids or ())
         )
         self._trace_update(
             trace,
@@ -409,7 +549,7 @@ class VectorRetrieval(BaseRetrieval):
             scope_ids=requested_scope,
             candidate_k=candidate_k,
             lexical_status=lexical_status,
-            lexical_result_count=sum(1 for item in result if item.score == -1.0),
+            lexical_result_count=lexical_result_count,
             scope_fallback=False,
         )
         if should_retry:
@@ -418,15 +558,18 @@ class VectorRetrieval(BaseRetrieval):
                 scope_fallback=True,
                 scope_fallback_reason="zero_scoped_hits",
             )
-            result, lexical_status, branch_errors = retrieve_candidates(fallback_ids)
+            result, lexical_status, branch_errors, lexical_result_count = (
+                retrieve_candidates(fallback_ids)
+            )
             result = self._deduplicate_docs(self._filter_to_scope(result, fallback_ids))
+            result = self._filter_to_metadata(result, metadata_filter)
             requested_scope = fallback_ids
             self._trace_update(
                 trace,
                 scope_status="fallback",
                 scope_ids=fallback_ids,
                 lexical_status=lexical_status,
-                lexical_result_count=sum(1 for item in result if item.score == -1.0),
+                lexical_result_count=lexical_result_count,
             )
 
         if branch_errors:
@@ -461,6 +604,7 @@ class VectorRetrieval(BaseRetrieval):
                 result = self._deduplicate_docs(
                     self._filter_to_scope(result, requested_scope)
                 )
+                result = self._filter_to_metadata(result, metadata_filter)
 
         result = self._filter_docs(result, top_k=top_k)
         print(f"Got raw {len(result)} retrieved documents")
@@ -470,6 +614,9 @@ class VectorRetrieval(BaseRetrieval):
         # we should copy the text from retrieved text chunk
         # to the thumbnail to get relevant LLM score correctly
         text_thumbnail_docs: dict[str, RetrievedDocument] = {}
+        allowed_thumbnail_ids = (
+            set(requested_scope) if requested_scope is not None else None
+        )
 
         non_thumbnail_docs = []
         raw_thumbnail_docs = []
@@ -479,15 +626,18 @@ class VectorRetrieval(BaseRetrieval):
                 doc.metadata["type"] = "image"
                 raw_thumbnail_docs.append(doc)
                 continue
+            non_thumbnail_docs.append(doc)
+            thumbnail_id = doc.metadata.get("thumbnail_doc_id")
+            if not isinstance(thumbnail_id, str) or not thumbnail_id:
+                continue
             if (
-                "thumbnail_doc_id" in doc.metadata
-                and len(thumbnail_doc_ids) < thumbnail_count
+                allowed_thumbnail_ids is not None
+                and thumbnail_id not in allowed_thumbnail_ids
             ):
-                thumbnail_id = doc.metadata["thumbnail_doc_id"]
+                continue
+            if len(thumbnail_doc_ids) < thumbnail_count:
                 thumbnail_doc_ids.add(thumbnail_id)
                 text_thumbnail_docs[thumbnail_id] = doc
-            else:
-                non_thumbnail_docs.append(doc)
 
         linked_thumbnail_docs = (
             self.doc_store.get(list(thumbnail_doc_ids)) if thumbnail_doc_ids else []
@@ -501,20 +651,41 @@ class VectorRetrieval(BaseRetrieval):
             len(raw_thumbnail_docs),
         )
         additional_docs = []
+        replaced_text_doc_ids = set()
 
         for thumbnail_doc in linked_thumbnail_docs:
-            text_doc = text_thumbnail_docs[thumbnail_doc.doc_id]
+            text_doc = text_thumbnail_docs.get(thumbnail_doc.doc_id)
+            if text_doc is None:
+                continue
+
+            text_file_id = text_doc.metadata.get("file_id")
+            thumbnail_file_id = thumbnail_doc.metadata.get("file_id")
+            if (
+                "file_id" in text_doc.metadata
+                and "file_id" in thumbnail_doc.metadata
+                and text_file_id != thumbnail_file_id
+            ):
+                continue
+
             doc_dict = thumbnail_doc.to_dict()
-            doc_dict["_id"] = text_doc.doc_id
+            doc_dict["id_"] = text_doc.doc_id
             doc_dict["content"] = text_doc.content
             doc_dict["metadata"]["type"] = "image"
             for key in text_doc.metadata:
                 if key not in doc_dict["metadata"]:
                     doc_dict["metadata"][key] = text_doc.metadata[key]
 
-            additional_docs.append(RetrievedDocument(**doc_dict, score=text_doc.score))
+            image_doc = RetrievedDocument(**doc_dict, score=text_doc.score)
+            if metadata_filter is not None and not metadata_filter(
+                image_doc.metadata or {}
+            ):
+                continue
+            additional_docs.append(image_doc)
+            replaced_text_doc_ids.add(text_doc.doc_id)
 
-        result = additional_docs + non_thumbnail_docs
+        result = additional_docs + [
+            doc for doc in non_thumbnail_docs if doc.doc_id not in replaced_text_doc_ids
+        ]
 
         if not result:
             # return output from raw retrieved thumbnails
