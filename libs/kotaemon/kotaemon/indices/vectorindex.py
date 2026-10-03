@@ -20,6 +20,7 @@ from kotaemon.embeddings import BaseEmbeddings
 from kotaemon.storages import BaseDocumentStore, BaseVectorStore
 
 from .base import BaseIndexing, BaseRetrieval
+from .knowledge.retrieval.diversity import select_diverse_documents
 from .rankings import BaseReranking, LLMReranking
 
 VECTOR_STORE_FNAME = "vectorstore"
@@ -133,6 +134,7 @@ class VectorRetrieval(BaseRetrieval):
     top_k: int = 5
     first_round_top_k_mult: int = 10
     retrieval_mode: str = "hybrid"  # vector, text, hybrid
+    max_per_parent_or_section: Optional[int] = 2
 
     def _filter_docs(
         self, documents: list[RetrievedDocument], top_k: int | None = None
@@ -606,11 +608,20 @@ class VectorRetrieval(BaseRetrieval):
                 )
                 result = self._filter_to_metadata(result, metadata_filter)
 
-        result = self._filter_docs(result, top_k=top_k)
+        result = select_diverse_documents(
+            result,
+            top_k=top_k,
+            parent_section_cap=self.max_per_parent_or_section,
+        )
+        self._trace_update(
+            trace,
+            diversity_selected_ids=[doc.doc_id for doc in result],
+        )
         print(f"Got raw {len(result)} retrieved documents")
 
         # add page thumbnails to the result if exists
-        thumbnail_doc_ids: set[str] = set()
+        thumbnail_doc_ids: list[str] = []
+        seen_thumbnail_ids: set[str] = set()
         # we should copy the text from retrieved text chunk
         # to the thumbnail to get relevant LLM score correctly
         text_thumbnail_docs: dict[str, RetrievedDocument] = {}
@@ -618,15 +629,12 @@ class VectorRetrieval(BaseRetrieval):
             set(requested_scope) if requested_scope is not None else None
         )
 
-        non_thumbnail_docs = []
         raw_thumbnail_docs = []
         for doc in result:
             if doc.metadata.get("type") == "thumbnail":
                 # change type to image to display on UI
-                doc.metadata["type"] = "image"
                 raw_thumbnail_docs.append(doc)
                 continue
-            non_thumbnail_docs.append(doc)
             thumbnail_id = doc.metadata.get("thumbnail_doc_id")
             if not isinstance(thumbnail_id, str) or not thumbnail_id:
                 continue
@@ -635,8 +643,12 @@ class VectorRetrieval(BaseRetrieval):
                 and thumbnail_id not in allowed_thumbnail_ids
             ):
                 continue
-            if len(thumbnail_doc_ids) < thumbnail_count:
-                thumbnail_doc_ids.add(thumbnail_id)
+            if (
+                len(thumbnail_doc_ids) < max(0, thumbnail_count)
+                and thumbnail_id not in seen_thumbnail_ids
+            ):
+                thumbnail_doc_ids.append(thumbnail_id)
+                seen_thumbnail_ids.add(thumbnail_id)
                 text_thumbnail_docs[thumbnail_id] = doc
 
         linked_thumbnail_docs = (
@@ -646,23 +658,33 @@ class VectorRetrieval(BaseRetrieval):
             "thumbnail docs",
             len(linked_thumbnail_docs),
             "non-thumbnail docs",
-            len(non_thumbnail_docs),
+            len(result) - len(raw_thumbnail_docs),
             "raw-thumbnail docs",
             len(raw_thumbnail_docs),
         )
-        additional_docs = []
-        replaced_text_doc_ids = set()
+        linked_thumbnails_by_text_id: dict[str, RetrievedDocument] = {}
 
-        for thumbnail_doc in linked_thumbnail_docs:
+        thumbnails_by_id = {
+            thumbnail_doc.doc_id: thumbnail_doc
+            for thumbnail_doc in linked_thumbnail_docs
+        }
+        for thumbnail_id in thumbnail_doc_ids:
+            thumbnail_doc = thumbnails_by_id.get(thumbnail_id)
+            if thumbnail_doc is None:
+                continue
             text_doc = text_thumbnail_docs.get(thumbnail_doc.doc_id)
             if text_doc is None:
                 continue
 
-            text_file_id = text_doc.metadata.get("file_id")
-            thumbnail_file_id = thumbnail_doc.metadata.get("file_id")
+            text_file_id = text_doc.metadata.get(
+                "document_id"
+            ) or text_doc.metadata.get("file_id")
+            thumbnail_file_id = thumbnail_doc.metadata.get(
+                "document_id"
+            ) or thumbnail_doc.metadata.get("file_id")
             if (
-                "file_id" in text_doc.metadata
-                and "file_id" in thumbnail_doc.metadata
+                text_file_id is not None
+                and thumbnail_file_id is not None
                 and text_file_id != thumbnail_file_id
             ):
                 continue
@@ -680,18 +702,21 @@ class VectorRetrieval(BaseRetrieval):
                 image_doc.metadata or {}
             ):
                 continue
-            additional_docs.append(image_doc)
-            replaced_text_doc_ids.add(text_doc.doc_id)
+            linked_thumbnails_by_text_id[text_doc.doc_id] = image_doc
 
-        result = additional_docs + [
-            doc for doc in non_thumbnail_docs if doc.doc_id not in replaced_text_doc_ids
-        ]
+        raw_thumbnail_count = 0
+        final_result = []
+        for doc in result:
+            if doc.metadata.get("type") == "thumbnail":
+                if raw_thumbnail_count >= max(0, thumbnail_count):
+                    continue
+                doc.metadata["type"] = "image"
+                raw_thumbnail_count += 1
+                final_result.append(doc)
+            else:
+                final_result.append(linked_thumbnails_by_text_id.get(doc.doc_id, doc))
 
-        if not result:
-            # return output from raw retrieved thumbnails
-            result = self._filter_docs(raw_thumbnail_docs, top_k=thumbnail_count)
-
-        return result
+        return final_result[: max(0, top_k)]
 
 
 class TextVectorQA(BaseComponent):
