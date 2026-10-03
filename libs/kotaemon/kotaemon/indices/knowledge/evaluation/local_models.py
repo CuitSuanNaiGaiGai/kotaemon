@@ -54,10 +54,14 @@ _OFFLINE_PROCESS_ERROR = (
 
 @dataclass(frozen=True)
 class LocalModelPaths:
-    """Explicit local directories for the embedding and reranking models."""
+    """Local model assets plus verified identity and cache provenance."""
 
     embedding_model_dir: Path
     reranker_model_dir: Path
+    embedding_revision: str | None = None
+    embedding_weight_source: Literal["cached", "downloaded"] | None = None
+    reranker_revision: str | None = None
+    reranker_weight_source: Literal["cached", "downloaded"] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "embedding_model_dir", Path(self.embedding_model_dir))
@@ -98,18 +102,26 @@ def _read_indexed_weight_files(model_dir: Path, index_path: Path) -> list[Path]:
     try:
         index = json.loads(index_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid local model weight index: {index_path.name}") from exc
+        raise ValueError(
+            f"invalid local model weight index: {index_path.name}"
+        ) from exc
 
     weight_map = index.get("weight_map") if isinstance(index, dict) else None
     if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError(f"local model weight index has no weight_map: {index_path.name}")
+        raise ValueError(
+            f"local model weight index has no weight_map: {index_path.name}"
+        )
 
     filenames = list(weight_map.values())
     if any(not isinstance(name, str) or Path(name).name != name for name in filenames):
-        raise ValueError(f"local model weight index contains unsafe shard names: {index_path.name}")
+        raise ValueError(
+            f"local model weight index contains unsafe shard names: {index_path.name}"
+        )
     filenames = sorted(set(filenames))
     shards = [model_dir / name for name in filenames]
-    missing = [path.name for path in shards if not path.is_file() or path.stat().st_size == 0]
+    missing = [
+        path.name for path in shards if not path.is_file() or path.stat().st_size == 0
+    ]
     if missing:
         raise FileNotFoundError(
             "local model is missing weight shard files: " + ", ".join(missing)
@@ -118,14 +130,18 @@ def _read_indexed_weight_files(model_dir: Path, index_path: Path) -> list[Path]:
 
 
 def _local_weight_files(model_dir: Path) -> list[Path]:
-    indexed = [model_dir / name for name in _WEIGHT_FILES[2:] if (model_dir / name).exists()]
+    indexed = [
+        model_dir / name for name in _WEIGHT_FILES[2:] if (model_dir / name).exists()
+    ]
     if indexed:
         files = []
         for index_path in indexed:
             files.extend(_read_indexed_weight_files(model_dir, index_path))
         return sorted(set(files))
 
-    direct = [model_dir / name for name in _WEIGHT_FILES[:2] if (model_dir / name).is_file()]
+    direct = [
+        model_dir / name for name in _WEIGHT_FILES[:2] if (model_dir / name).is_file()
+    ]
     sharded = sorted(
         path
         for pattern in ("model-*.safetensors", "pytorch_model-*.bin")
@@ -158,8 +174,7 @@ def _local_weight_files(model_dir: Path) -> list[Path]:
                 for number in missing
             ]
             raise FileNotFoundError(
-                "local model is missing weight shard files: "
-                + ", ".join(missing_names)
+                "local model is missing weight shard files: " + ", ".join(missing_names)
             )
     if any(path.stat().st_size == 0 for path in files):
         raise FileNotFoundError(
@@ -177,7 +192,9 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_and_hash_model_dir(model_path: str | Path) -> tuple[Path, tuple[tuple[str, str], ...]]:
+def _validate_and_hash_model_dir(
+    model_path: str | Path,
+) -> tuple[Path, tuple[tuple[str, str], ...]]:
     model_dir = Path(model_path).expanduser()
     if not model_dir.is_dir():
         raise FileNotFoundError(
@@ -273,9 +290,7 @@ def _load_local_flag_backend(
     # expose `local_files_only`; the checked process state and explicit local
     # path prevent fallback to the Hub.
     model_path_arg = str(model_path)
-    model_id = (
-        EMBEDDING_MODEL_ID if model_kind == "embedding" else RERANKER_MODEL_ID
-    )
+    model_id = EMBEDDING_MODEL_ID if model_kind == "embedding" else RERANKER_MODEL_ID
     try:
         if model_kind == "embedding":
             return BGEM3FlagModel(
@@ -327,9 +342,13 @@ def _dense_vectors(result: Any, expected_count: int) -> list[list[float]]:
 
     # The upstream API removes the batch dimension for a scalar string. Accept
     # that representation for a one-item result while always sending lists.
-    if expected_count == 1 and rows and all(
-        isinstance(value, numbers.Real) and not isinstance(value, bool)
-        for value in rows
+    if (
+        expected_count == 1
+        and rows
+        and all(
+            isinstance(value, numbers.Real) and not isinstance(value, bool)
+            for value in rows
+        )
     ):
         rows = [rows]
     if len(rows) != expected_count:
@@ -415,7 +434,9 @@ class BgeM3Embeddings(BaseEmbeddings):
         self._batch_size = batch_size
         self._embedding_dimension: int | None = None
         if backend is None:
-            resolved_path, weight_hashes = _validate_and_hash_model_dir(self._model_path)
+            resolved_path, weight_hashes = _validate_and_hash_model_dir(
+                self._model_path
+            )
             self._model_path = resolved_path
             backend = _load_local_flag_backend(
                 self._model_path,
@@ -460,7 +481,9 @@ class BgeM3Embeddings(BaseEmbeddings):
                 for item in text
             ]
             if any(not isinstance(item, (str, Document)) for item in text):
-                raise TypeError("embedding input lists must contain strings or Documents")
+                raise TypeError(
+                    "embedding input lists must contain strings or Documents"
+                )
             is_query = False
         else:
             raise TypeError("embedding input must be a string, Document, or list")
@@ -484,7 +507,10 @@ class BgeM3Embeddings(BaseEmbeddings):
             raw_embeddings = self._backend.encode_corpus(input_texts, **options)
         vectors = _dense_vectors(raw_embeddings, len(documents))
         dimension = len(vectors[0])
-        if self._embedding_dimension is not None and self._embedding_dimension != dimension:
+        if (
+            self._embedding_dimension is not None
+            and self._embedding_dimension != dimension
+        ):
             raise ValueError("dense embedding vectors must have consistent dimensions")
         self._embedding_dimension = dimension
 
@@ -527,7 +553,9 @@ class BgeM3Reranking(BaseReranking):
         self._passage_max_length = passage_max_length
         self._batch_size = batch_size
         if backend is None:
-            resolved_path, weight_hashes = _validate_and_hash_model_dir(self._model_path)
+            resolved_path, weight_hashes = _validate_and_hash_model_dir(
+                self._model_path
+            )
             self._model_path = resolved_path
             backend = _load_local_flag_backend(
                 self._model_path,
