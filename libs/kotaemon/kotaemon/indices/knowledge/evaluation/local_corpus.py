@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _SUPPORTED_SUFFIXES = frozenset({".pdf", ".docx", ".md", ".xlsx"})
+_HASH_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -40,10 +41,15 @@ def scan_sources(root: Path) -> tuple[SourceFile, ...]:
         if suffix not in _SUPPORTED_SUFFIXES:
             continue
 
-        data = path.read_bytes()
         relative_path = path.relative_to(root).as_posix()
-        sha256 = hashlib.sha256(data).hexdigest()
-        candidates.append((relative_path, sha256, suffix, len(data)))
+        digest = hashlib.sha256()
+        byte_size = 0
+        with path.open("rb") as source:
+            while chunk := source.read(_HASH_CHUNK_SIZE):
+                digest.update(chunk)
+                byte_size += len(chunk)
+
+        candidates.append((relative_path, digest.hexdigest(), suffix, byte_size))
 
     candidates.sort(key=lambda row: row[0])
 

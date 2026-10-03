@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 from kotaemon.indices.knowledge.evaluation.local_corpus import scan_sources
 from .knowledge_eval_test_fixtures import document, make_generated_corpus
@@ -72,6 +73,48 @@ def test_scan_sources_excludes_symlinks(tmp_path):
     rows = scan_sources(root)
 
     assert [row.relative_path for row in rows] == ["real.md"]
+
+
+def test_scan_sources_hashes_files_in_bounded_chunks(tmp_path, monkeypatch):
+    root = tmp_path / "sources"
+    root.mkdir()
+    source = root / "large.md"
+    content = b"x" * (2 * 1024 * 1024 + 3)
+    source.write_bytes(content)
+
+    original_open = Path.open
+    read_sizes = []
+
+    class BoundedReader:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self.file.__exit__(*exc_info)
+
+        def read(self, size=-1):
+            assert 0 < size <= 1024 * 1024
+            read_sizes.append(size)
+            return self.file.read(size)
+
+    def tracked_open(path, *args, **kwargs):
+        file = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path == source and mode == "rb":
+            return BoundedReader(file)
+        return file
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+
+    (row,) = scan_sources(root)
+
+    assert row.sha256 == hashlib.sha256(content).hexdigest()
+    assert row.byte_size == len(content)
+    assert read_sizes == [1024 * 1024] * 4
 
 
 def test_generated_corpus_and_document_fixtures_are_deterministic(tmp_path):
