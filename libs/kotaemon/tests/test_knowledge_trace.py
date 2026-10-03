@@ -142,6 +142,65 @@ def test_trace_content_is_included_only_when_explicitly_enabled():
     assert "OPT_IN_SOURCE_TEXT" in included.to_json()
 
 
+def test_extra_table_trace_projection_is_isolated_from_main_summary():
+    trace = RetrievalTrace()
+    main = trace.scoped(query_kind="main")
+    extra_table = trace.scoped(query_kind="extra_table")
+
+    main.record("merged", ids=["main-merged"])
+    main.record("reranker", name="main-reranker", candidates=["main-ranked"])
+    main.record("diversity", selected_ids=["main-diverse"])
+    main.record("final", ids=["main-final"])
+
+    extra_table.record("merged", ids=["table-merged"])
+    extra_table.record("reranker", name="table-reranker", candidates=["table-ranked"])
+    extra_table.record("diversity", selected_ids=["table-diverse"])
+    extra_table.record("final", ids=["table-final"])
+    extra_table.update(auxiliary_status={"complete": True})
+
+    snapshot = trace.to_dict()
+    auxiliary = snapshot["auxiliary_retrievals"]["extra_table"]
+
+    assert snapshot["merged_ids"] == ["main-merged"]
+    assert snapshot["rerankers"] == [
+        {
+            "query_kind": "main",
+            "name": "main-reranker",
+            "candidates": ["main-ranked"],
+        }
+    ]
+    assert snapshot["diversity_selected_ids"] == ["main-diverse"]
+    assert snapshot["final_chunk_ids"] == ["main-final"]
+    assert "auxiliary_status" not in snapshot
+
+    assert auxiliary["merged_ids"] == ["table-merged"]
+    assert auxiliary["rerankers"][0]["name"] == "table-reranker"
+    assert auxiliary["diversity_selected_ids"] == ["table-diverse"]
+    assert auxiliary["final_chunk_ids"] == ["table-final"]
+    assert auxiliary["auxiliary_status"] == {"complete": True}
+    assert [event["stage"] for event in snapshot["events"]] == [
+        "merged",
+        "reranker",
+        "diversity",
+        "final",
+        "merged",
+        "reranker",
+        "diversity",
+        "final",
+    ]
+    assert [event["query_kind"] for event in snapshot["events"]] == [
+        "main",
+        "main",
+        "main",
+        "main",
+        "extra_table",
+        "extra_table",
+        "extra_table",
+        "extra_table",
+    ]
+    assert json.loads(trace.to_json()) == snapshot
+
+
 def test_concurrent_traces_keep_independent_ordered_event_histories():
     traces = [RetrievalTrace() for _ in range(2)]
 

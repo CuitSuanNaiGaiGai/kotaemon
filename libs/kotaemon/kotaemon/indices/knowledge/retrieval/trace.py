@@ -148,17 +148,18 @@ class RetrievalTrace:
             fields = {**mapping, **fields}
         cleaned = self._clean_fields(fields)
         with self._lock:
+            target = self._projection_target(cleaned)
             for key, value in cleaned.items():
                 if key in {"events", "attempts", "rerankers"}:
                     # These histories are append-only so a legacy update cannot
                     # erase evidence recorded by earlier stages.
                     if key == "events":
                         continue
-                    existing = self._state.setdefault(key, [])
+                    existing = target.setdefault(key, [])
                     if isinstance(value, list):
                         existing.extend(deepcopy(value))
                     continue
-                self._state[key] = deepcopy(value)
+                target[key] = deepcopy(value)
 
     def record(self, stage: str, **fields: Any) -> None:
         """Append one named stage event and update its useful summary projection."""
@@ -168,7 +169,7 @@ class RetrievalTrace:
         event = {"stage": stage, **clean}
         with self._lock:
             self._state["events"].append(deepcopy(event))
-            self._project_event(stage, clean)
+            self._project_event(stage, clean, self._projection_target(clean))
 
     def scoped(self, **context: Any) -> "_TraceScope":
         """Return a lightweight writer that tags events for one QA subquery."""
@@ -184,9 +185,19 @@ class RetrievalTrace:
                 result[key] = cleaned
         return result
 
-    def _project_event(self, stage: str, fields: dict[str, Any]) -> None:
+    def _projection_target(self, fields: Mapping[str, Any]) -> dict[str, Any]:
+        if fields.get("query_kind") != "extra_table":
+            return self._state
+        auxiliary = self._state.setdefault("auxiliary_retrievals", {})
+        target = auxiliary.setdefault("extra_table", {})
+        target.setdefault("query_kind", "extra_table")
+        return target
+
+    def _project_event(
+        self, stage: str, fields: dict[str, Any], target: dict[str, Any]
+    ) -> None:
         if stage == "request":
-            self._state.update(fields)
+            target.update(fields)
         elif stage in {
             "plan",
             "explicit_filters",
@@ -194,27 +205,27 @@ class RetrievalTrace:
             "chunk_scope",
             "context",
         }:
-            self._state[stage] = deepcopy(fields.get(stage, fields))
+            target[stage] = deepcopy(fields.get(stage, fields))
         elif stage == "recall_attempt":
-            self._state.setdefault("attempts", []).append(deepcopy(fields))
+            target.setdefault("attempts", []).append(deepcopy(fields))
         elif stage == "merged":
-            self._state["merged_ids"] = deepcopy(fields.get("ids", []))
+            target["merged_ids"] = deepcopy(fields.get("ids", []))
         elif stage == "reranker":
-            self._state.setdefault("rerankers", []).append(deepcopy(fields))
+            target.setdefault("rerankers", []).append(deepcopy(fields))
         elif stage == "diversity":
-            self._state["diversity"] = deepcopy(fields)
+            target["diversity"] = deepcopy(fields)
             if "selected_ids" in fields:
-                self._state["diversity_selected_ids"] = deepcopy(fields["selected_ids"])
+                target["diversity_selected_ids"] = deepcopy(fields["selected_ids"])
         elif stage == "scope_fallback":
-            self._state["scope_fallback"] = True
-            self._state["scope_fallback_reason"] = fields.get("reason")
+            target["scope_fallback"] = True
+            target["scope_fallback_reason"] = fields.get("reason")
         elif stage == "final":
-            self._state["final_chunk_ids"] = deepcopy(fields.get("ids", []))
+            target["final_chunk_ids"] = deepcopy(fields.get("ids", []))
         elif stage == "final_ui":
-            self._state["final_ui_chunk_ids"] = deepcopy(fields.get("ids", []))
+            target["final_ui_chunk_ids"] = deepcopy(fields.get("ids", []))
         elif stage == "no_search":
-            self._state["search_status"] = "not_run"
-            self._state["no_search_reason"] = fields.get("reason")
+            target["search_status"] = "not_run"
+            target["no_search_reason"] = fields.get("reason")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a detached JSON-compatible snapshot."""

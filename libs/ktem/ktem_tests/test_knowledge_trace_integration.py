@@ -327,11 +327,20 @@ def test_extra_table_trace_reports_the_final_authorized_ui_ids(monkeypatch):
         text="Selected table contents.",
         metadata={"file_id": "source-a", "type": "table", "page_label": "4"},
     )
+
+    def search_main(self, query, **kwargs):
+        trace = kwargs["trace"]
+        trace.record("merged", ids=["selected-text"])
+        trace.record("reranker", name="main-reranker", candidates=["selected-text"])
+        trace.record("diversity", selected_ids=["selected-text"])
+        trace.record("final", ids=["selected-text"])
+        return [selected]
+
     service = type(
         "Service",
         (),
         {
-            "search": lambda self, query, **kwargs: [selected],
+            "search": search_main,
             "chunk_ids_for_sources": lambda self, ids: [
                 "selected-text",
                 "selected-table",
@@ -341,7 +350,13 @@ def test_extra_table_trace_reports_the_final_authorized_ui_ids(monkeypatch):
 
     class ExtraRetriever:
         def __call__(self, **kwargs):
-            kwargs["trace"].record("extra_table_result", ids=["selected-table"])
+            trace = kwargs["trace"]
+            trace.record("merged", ids=["selected-table"])
+            trace.record(
+                "reranker", name="table-reranker", candidates=["selected-table"]
+            )
+            trace.record("diversity", selected_ids=["selected-table"])
+            trace.record("final", ids=["selected-table"])
             return [selected_table]
 
     monkeypatch.setattr(
@@ -365,9 +380,17 @@ def test_extra_table_trace_reports_the_final_authorized_ui_ids(monkeypatch):
 
     result = pipeline.run(text="question", doc_ids=["source-a"], trace=trace)
 
+    snapshot = trace.to_dict()
     assert [doc.doc_id for doc in result] == ["selected-text", "selected-table"]
-    assert trace.to_dict()["final_ui_chunk_ids"] == ["selected-text", "selected-table"]
-    assert "unselected" not in str(trace.to_dict()["final_ui_chunk_ids"])
+    assert snapshot["merged_ids"] == ["selected-text"]
+    assert snapshot["diversity_selected_ids"] == ["selected-text"]
+    assert snapshot["final_chunk_ids"] == ["selected-text"]
+    assert snapshot["final_ui_chunk_ids"] == ["selected-text", "selected-table"]
+    auxiliary = snapshot["auxiliary_retrievals"]["extra_table"]
+    assert auxiliary["merged_ids"] == ["selected-table"]
+    assert auxiliary["diversity_selected_ids"] == ["selected-table"]
+    assert auxiliary["final_chunk_ids"] == ["selected-table"]
+    assert "unselected" not in str(snapshot["final_ui_chunk_ids"])
 
 
 def test_extra_table_trace_never_records_foreign_candidates_after_zero_scope_hits(
