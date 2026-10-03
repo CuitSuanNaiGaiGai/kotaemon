@@ -80,3 +80,4 @@ The six warnings remain dependency deprecations from PyMuPDF bindings and the in
 ### Commit
 
 Implementation commit SHA: `25d5eadc3fc3683300bd8e0c2d4a3932fd582c10` (`feat: prepare local corpus review drafts`).
+Follow-up fix commit SHA: `d4ec0f82a1716ddf589c1a469587225ad15fdf18` (`fix: preserve local review draft formats`).
