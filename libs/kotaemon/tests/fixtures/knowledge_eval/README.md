@@ -34,8 +34,9 @@ local/
 Write candidate extracted records, source-level judgments, and independent
 evidence anchors to the ignored files in `local/draft/`. The judgment file uses
 stable source IDs so its labels remain unchanged across chunking arms. Anchor
-records identify source hashes and page, sheet, or section locations plus
-normalized-text offsets and an evidence digest. Do not put per-arm chunk IDs in
+records identify query IDs, source hashes, and page, sheet, or section locations
+plus normalized-text offsets and an evidence digest. Require at least one anchor
+for each relevant query/source pair. Do not put per-arm chunk IDs in
 the frozen gold. These files are working data for preparation and review, not
 runner inputs.
 

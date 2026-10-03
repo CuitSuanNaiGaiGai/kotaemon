@@ -53,8 +53,9 @@ Freeze the semantic gold at the source level so it remains unchanged when a
 chunking arm produces different chunk boundaries and IDs. Every query records
 stable content-hash-based `source_id` values for relevant and, where an
 explicit scope is violated, disallowed sources. Preserve evidence anchors in
-`anchors.jsonl`: source SHA-256, page/sheet/section locator, normalized-text
-offsets, and a digest of the cited passage. Anchors establish that each source
+`anchors.jsonl`: query ID, source SHA-256, page/sheet/section locator,
+normalized-text offsets, and a digest of the cited passage. Require at least one
+anchor for every relevant query/source pair. Anchors establish that each source
 judgment has concrete evidence and allow each chunking arm to report whether its
 chunks cover that evidence; do not write arm-specific chunk IDs back into the
 frozen gold.
@@ -90,9 +91,11 @@ never mutate v1.
 Load only an explicitly selected, hash-verified local snapshot. Use the same
 reviewed query/source gold, evidence anchors, query order, filters, global
 identity planner, vector-only retrieval mode, random seed, and source metadata in
-all four arms. Keep K=5 and retrieve an M=20 candidate pool in every arm; record
-actual pool sizes. Disable query rewriting, MMR/result extension, and external
-services. This holds planning constant so the component experiments do not
+all four arms. Keep final K=5 and request an M=20 vector candidate pool in every
+arm; set `first_round_top_k_mult=1`, disable query rewriting and result
+extension, and set the parent/section cap to `None`. Record the vector candidate
+window before reranking and post-ranking duplicate/diversity processing. This
+holds planning and candidate depth constant so the component experiments do not
 confound retrieval changes with planner behavior.
 
 Run these one-factor comparisons against one shared baseline. The baseline
@@ -116,9 +119,10 @@ queries to a remote service. Require the local models to be available before
 running those arms; do not silently substitute a different model.
 
 For the reranker comparison, assert that each query's reranker receives exactly
-the same ordered 20 baseline candidates that the no-reranker arm retrieves. If
-fewer than 20 candidates exist, retain the query and record the actual count.
-After ranking, map results to first-occurrence source IDs and score the first
+the same ordered pre-reranker vector candidate window as the baseline. Score the
+baseline using the same candidates before reranking. If fewer than 20 candidates
+exist, retain the query and record the actual count. After ranking and the same
+post-processing, map results to first-occurrence source IDs and score the first
 five distinct sources. Do not silently drop queries or tune model/chunk settings
 against the frozen evaluation gold.
 
@@ -127,8 +131,10 @@ Wrong-scope@5 as the pooled count of disallowed distinct sources divided by the
 number of distinct source results in the first-five window for queries with an
 explicit wrong-scope label; report its numerator/denominator and show it as
 undefined when the denominator is zero. For every arm, include its metric value,
-baseline value, signed delta, query count, and source-level judgment unit. Also
-report evidence-anchor coverage and pre-rerank candidate counts as diagnostics.
+baseline value, signed delta (`variant - baseline`), query count, and source-level
+judgment unit. Higher Hit/Recall/MRR and lower Wrong-scope are improvements.
+Also report evidence-anchor coverage and pre-rerank candidate counts as
+diagnostics.
 Include per-query results, run manifests, and traces in ignored local artifacts.
 The existing synthetic planner comparison remains a separate experiment; it is
 not mixed into these three retrieval component comparisons.
