@@ -14,3 +14,11 @@ Task 11: implementation committed for GPT-6 Sol Medium final review (`6361601f99
 Task 12: complete (commit `9a1ce549bb416c2fe4407d669b115d33fda29b6b`; GPT-6 Sol Medium review passed; isolated extra-table trace summaries)
 Task 13: complete (commit `088b4cd6108c51625f05f5c47a3bd455804bcf4e`; GPT-6 Sol Medium review passed; K=5 evaluation and preserved K=2 artifacts)
 Task 14: complete (commits `9dee88cc` and `d1dd9b3d`; GPT-6 Sol Medium re-review approved; local corpus drop zone and immutable snapshot hash contract; ignore/diff checks pass; docs-only; pytest not run)
+
+## Task 15: Fixed mini-corpus golden experiment
+
+Spec: `docs/superpowers/specs/2026-10-03-local-mini-corpus-experiment-design.md` (commit `0d4656d6`, delta clarified in `858ee602`)
+Plan: `docs/superpowers/plans/2026-10-03-mini-corpus-golden-experiment.md` (commit `858ee602`)
+Workflow: each numbered plan task is implemented by GPT-6 Luna Max using TDD, then reviewed by GPT-6 Sol Medium before the next task starts.
+Task 1: complete (commits `2e2bf9e1` and `ca2f77b6`; GPT-6 Sol Medium review approved; 5 focused tests pass; full suite 284 passed, 20 skipped)
+Tasks 2–7: pending
