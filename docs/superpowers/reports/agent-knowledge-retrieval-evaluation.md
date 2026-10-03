@@ -21,8 +21,9 @@ applies caller visibility and explicit path/type/metadata constraints before
 the existing `VectorRetrieval` stage. The planner can narrow that mandatory
 scope. An ambiguous or legacy query stays global within the visible catalog.
 The existing file UI behavior is unchanged: an empty selected-source list
-returns no results, and the explicit empty-allowlist check passed without a
-vector-store call. No production planner switch or schema change was added.
+returns no results. A supplemental check exercises an empty allowlist through
+both compared services without a vector-store call. No production planner
+switch or schema change was added.
 
 | Setting | Baseline | Planned |
 | --- | --- | --- |
@@ -53,6 +54,23 @@ Fixture SHA-256:
 ```text
 4150e95b07a1778db3dca01f816a31708c214f2ca4a9600178f0d310ce968998
 ```
+
+## Supplemental empty-authorization parity
+
+The first GPT-6 Sol Medium review otherwise approved Task 11 and identified one
+minor coverage gap: the empty-allowlist check covered only the planned service.
+The follow-up runs after the five judged queries, using the same indexed
+fixture and the same baseline/planned `KnowledgeService` instances. Both
+instances receive the unjudged query `张三在哪实习？` with
+`allowed_source_ids=[]`; both return no documents, and the vector query log is
+unchanged for each call. Each Task 10 trace records `search_status=not_run`,
+`no_search_reason=empty_visibility`, and a `no_search` event with reason
+`empty_visibility`.
+
+This check is supplemental and is not a sixth judgment. Both arms remain at
+five judged queries, and their metrics, candidate observations, and config
+fingerprint stay unchanged. The details are stored under
+[`authorization_parity.empty_allowlist`](artifacts/agent-retrieval-evaluation.json).
 
 ## Synthetic fixture evaluation metrics
 
@@ -139,14 +157,26 @@ has Hit/Recall/RR 0 and no wrong-scope denominator. Their macro Hit/Recall/MRR
 are 1/2, 1/4, and 1/4. Additional tests distinguish a null scope label from an
 empty disallowed-source list and reject missing observed candidate counts.
 
+The parity artifact test was authored before its runner update. Its first RED
+failed at the expected missing-artifact field; the focused GREEN verified both
+services, the no-search trace event, and unchanged vector-log counts.
+
+```text
+$ uv run pytest libs/ktem/ktem_tests/test_knowledge_retrieval_eval_integration.py::test_empty_allowlist_authorization_parity_is_unjudged_and_recorded -q
+1 failed in 4.73s (KeyError: 'authorization_parity')
+
+$ uv run pytest libs/ktem/ktem_tests/test_knowledge_retrieval_eval_integration.py::test_empty_allowlist_authorization_parity_is_unjudged_and_recorded -q
+1 passed in 5.62s
+```
+
 Final commands and observed results:
 
 ```text
 $ uv run pytest libs/kotaemon/tests/test_knowledge_retrieval_eval.py -q
-18 passed in 2.25s
+18 passed in 3.21s
 
 $ uv run pytest libs/kotaemon/tests/test_knowledge_retrieval_eval.py libs/ktem/ktem_tests/test_knowledge_retrieval_eval_integration.py libs/kotaemon/tests/test_knowledge_service.py libs/kotaemon/tests/test_knowledge_scoped_retrieval.py libs/kotaemon/tests/test_knowledge_context.py libs/kotaemon/tests/test_knowledge_trace.py libs/ktem/ktem_tests/test_knowledge_service_integration.py libs/ktem/ktem_tests/test_knowledge_trace_integration.py -q
-110 passed in 6.72s
+111 passed in 7.38s
 
 $ uv run black --check libs/kotaemon/kotaemon/indices/knowledge/evaluation/retrieval_eval.py libs/kotaemon/tests/test_knowledge_retrieval_eval.py libs/ktem/ktem_tests/test_knowledge_retrieval_eval_integration.py
 All done! ✨ 🍰 ✨

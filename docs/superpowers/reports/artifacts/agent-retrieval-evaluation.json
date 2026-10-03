@@ -554,5 +554,32 @@
       2
     ]
   },
-  "trace_artifact": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace.json"
+  "trace_artifact": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace.json",
+  "authorization_parity": {
+    "empty_allowlist": {
+      "judged": false,
+      "query": "张三在哪实习？",
+      "allowed_source_ids": [],
+      "baseline": {
+        "result_ids": [],
+        "vector_query_count": 0,
+        "search_status": "not_run",
+        "no_search_reason": "empty_visibility",
+        "no_search_event": {
+          "stage": "no_search",
+          "reason": "empty_visibility"
+        }
+      },
+      "planned": {
+        "result_ids": [],
+        "vector_query_count": 0,
+        "search_status": "not_run",
+        "no_search_reason": "empty_visibility",
+        "no_search_event": {
+          "stage": "no_search",
+          "reason": "empty_visibility"
+        }
+      }
+    }
+  }
 }

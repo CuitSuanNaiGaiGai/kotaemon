@@ -306,6 +306,47 @@ def _metric_by_id(run):
     return {metric.case_id: metric for metric in run.per_query}
 
 
+def _run_empty_allowlist_parity(baseline_service, planned_service, fixture_state):
+    query = "张三在哪实习？"
+    parity = {
+        "judged": False,
+        "query": query,
+        "allowed_source_ids": [],
+    }
+    for arm, service in (
+        ("baseline", baseline_service),
+        ("planned", planned_service),
+    ):
+        trace = RetrievalTrace()
+        calls_before = len(fixture_state["vector_store"].query_log)
+        result = service.search(query, allowed_source_ids=[], trace=trace)
+        calls_after = len(fixture_state["vector_store"].query_log)
+        trace_snapshot = trace.to_dict()
+        vector_query_count = calls_after - calls_before
+        no_search_reason = trace_snapshot["no_search_reason"]
+        no_search_events = [
+            event
+            for event in trace_snapshot["events"]
+            if event.get("stage") == "no_search"
+        ]
+        assert result == []
+        assert calls_after == calls_before
+        assert vector_query_count == 0
+        assert no_search_reason == "empty_visibility"
+        assert trace_snapshot["search_status"] == "not_run"
+        assert no_search_events == [
+            {"stage": "no_search", "reason": "empty_visibility"}
+        ]
+        parity[arm] = {
+            "result_ids": [document.doc_id for document in result],
+            "vector_query_count": vector_query_count,
+            "search_status": trace_snapshot["search_status"],
+            "no_search_reason": no_search_reason,
+            "no_search_event": no_search_events[0],
+        }
+    return parity
+
+
 def _run_synthetic_comparison(artifact_dir: Path | None = None):
     fixture_state = _make_indexed_fixture()
     baseline_service = _make_service(
@@ -373,6 +414,9 @@ def _run_synthetic_comparison(artifact_dir: Path | None = None):
         baseline_config={**shared_config, "planner": "identity-global"},
         planned_config={**shared_config, "planner": "QueryPlanner"},
         trace_factory=make_trace,
+    )
+    authorization_parity = _run_empty_allowlist_parity(
+        baseline_service, planned_service, fixture_state
     )
 
     planned_zhang_docs = result_docs[("planned", "zhang-internship")]
@@ -443,6 +487,9 @@ def _run_synthetic_comparison(artifact_dir: Path | None = None):
         }
         machine_report["observed_candidate_counts"] = observed_candidate_counts
         machine_report["trace_artifact"] = _TRACE_RELATIVE
+        machine_report["authorization_parity"] = {
+            "empty_allowlist": authorization_parity
+        }
         (artifact_dir / Path(_METRICS_RELATIVE).name).write_text(
             json.dumps(machine_report, ensure_ascii=False, indent=2, allow_nan=False)
             + "\n",
@@ -529,3 +576,38 @@ def test_explicit_empty_allowlist_does_not_query_vector_store():
     assert result == []
     assert len(fixture_state["vector_store"].query_log) == before
     assert trace.to_dict()["no_search_reason"] == "empty_visibility"
+
+
+def test_empty_allowlist_authorization_parity_is_unjudged_and_recorded():
+    _run_synthetic_comparison(_ARTIFACTS)
+    machine_report = json.loads(
+        (_ARTIFACTS / Path(_METRICS_RELATIVE).name).read_text(encoding="utf-8")
+    )
+
+    assert machine_report["authorization_parity"]["empty_allowlist"] == {
+        "judged": False,
+        "query": "张三在哪实习？",
+        "allowed_source_ids": [],
+        "baseline": {
+            "result_ids": [],
+            "vector_query_count": 0,
+            "search_status": "not_run",
+            "no_search_reason": "empty_visibility",
+            "no_search_event": {
+                "stage": "no_search",
+                "reason": "empty_visibility",
+            },
+        },
+        "planned": {
+            "result_ids": [],
+            "vector_query_count": 0,
+            "search_status": "not_run",
+            "no_search_reason": "empty_visibility",
+            "no_search_event": {
+                "stage": "no_search",
+                "reason": "empty_visibility",
+            },
+        },
+    }
+    assert machine_report["baseline"]["judged_query_count"] == 5
+    assert machine_report["planned"]["judged_query_count"] == 5

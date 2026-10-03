@@ -7,6 +7,8 @@
 - Tests were authored first. Initial RED: `uv run pytest libs/kotaemon/tests/test_knowledge_retrieval_eval.py -q` → **14 failed in 3.09s**, all at the explicit missing-evaluator-package guard before reaching behavioral assertions. After implementation, the first behavioral run was **13 passed, 1 failed** because the candidate-count diagnostic wording differed; the assertion was tightened around behavior and the pure suite passed.
 - The hand-worked arithmetic oracle covers K-window duplicates and rank, source-level deduplication, pooled wrong-scope denominator, unknown chunk-to-Source mapping, schema validation, and baseline/planned config equality. A separate check confirms null scope differs from an empty disallowed-source list.
 - The paired runner requires the two JSON configs to match except for planner identity. With traces enabled, it also rejects missing or unequal observed `candidate_k` values.
+- GPT-6 Sol Medium review identified one minor coverage gap: explicit `allowed_source_ids=[]` needed parity coverage for both baseline and planned services. The supplemental check uses the same indexed fixture and service instances, runs after the five judged queries, and records an unjudged result. Both services return no documents, make zero vector queries, and record `search_status=not_run`, `no_search_reason=empty_visibility`, and a `no_search` event with reason `empty_visibility`. The five-query metrics and judged counts remain unchanged.
+- Focused TDD evidence for the parity artifact: initial RED failed on missing `authorization_parity` (**1 failed in 4.73s**, `KeyError`); after adding the runner and artifact record, GREEN passed (**1 passed in 5.62s**).
 
 ## Implementation
 
@@ -47,10 +49,10 @@ retrieval, context, trace, and integration tests, passed:
 
 ```text
 $ uv run pytest libs/kotaemon/tests/test_knowledge_retrieval_eval.py -q
-18 passed in 2.25s
+18 passed in 3.21s
 
 $ uv run pytest libs/kotaemon/tests/test_knowledge_retrieval_eval.py libs/ktem/ktem_tests/test_knowledge_retrieval_eval_integration.py libs/kotaemon/tests/test_knowledge_service.py libs/kotaemon/tests/test_knowledge_scoped_retrieval.py libs/kotaemon/tests/test_knowledge_context.py libs/kotaemon/tests/test_knowledge_trace.py libs/ktem/ktem_tests/test_knowledge_service_integration.py libs/ktem/ktem_tests/test_knowledge_trace_integration.py -q
-110 passed in 6.72s
+111 passed in 7.38s
 ```
 
 Static checks on the three Task 11 Python files:
@@ -78,5 +80,5 @@ run above subsequently passed with both Task 11 modules included. No runtime
 dependency or NLTK cache changes were made. The exact command and collection
 output are recorded in the full report.
 
-The exact Task 11-only commit SHA is included in the implementation handoff to
-the parent for GPT-6 Sol Medium review.
+Task 11 implementation commit SHA: `6361601f999baaf4bb6ff8b74a74a4a444714577`.
+The Task 11 review-fix commit SHA is recorded in the parent handoff after commit.
