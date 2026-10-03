@@ -59,4 +59,4 @@ exit 0
 
 ### Commit
 
-Implementation commit SHA: to be filled after committing the implementation.
+Implementation commit SHA: `25d5eadc3fc3683300bd8e0c2d4a3932fd582c10` (`feat: prepare local corpus review drafts`).
