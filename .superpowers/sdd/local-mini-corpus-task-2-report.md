@@ -34,7 +34,8 @@ exit 0
 
 ### Implementation
 
-- Added `build_local_draft` with deterministic records and chunk IDs, root-relative source provenance, empty `anchors.json`, and writes restricted to the caller-provided output directory.
+- Added `build_local_draft` with deterministic records and chunk IDs, root-relative source provenance, empty `anchors.jsonl`, and writes restricted to the caller-provided output directory.
+- Normalizes CRLF and CR to LF and applies Unicode NFC while retaining paragraph and line boundaries. Blank extraction checks trim only for emptiness; offsets remain relative to the preserved normalized text.
 - Reads only selected canonical supported sources. Byte duplicates remain in the exclusion/provenance report and have an observable test assertion that only the canonical path gets a reader diagnostic. Supported files are hashed by the inventory stage to establish content identity; unsupported files are listed by relative path without opening or hashing their contents.
 - Added PDF, DOCX, Markdown, and XLSX generated fixtures covering reader locators, empty PDF pages, blank spreadsheet rows, malformed DOCX, duplicate bytes, unsupported files, and deterministic output in separate draft directories. The Task 1 Markdown-only `make_generated_corpus` contract remains unchanged.
 - Records the selected parser and attempts in source configuration and quality diagnostics. In this environment, `UnstructuredReader(split_documents=True)` cannot initialize because `libmagic` is unavailable; a local `DocxReader` fallback is selected and explicitly reported as document granularity with `needs_review=True` because it coalesces paragraph text. No element locator is invented. Corrupt DOCX input remains in the report as an extraction failure.
@@ -52,10 +53,29 @@ exit 0
 
 ### Limitations
 
-- The local review-draft API does not create query-linked evidence anchors; `anchors.json` is empty until reviewed questions and spans exist.
+- The local review-draft API does not create query-linked evidence anchors; `anchors.jsonl` is empty until reviewed questions and spans exist.
 - The production CLI that enforces containment under the ignored `local/draft/` tree is outside Task 2. This API writes only beneath the explicit `output_dir` argument, and tests use temporary directories.
 - DOCX parsing uses the local fallback in this environment and requires human review of paragraph-level evidence granularity.
 - The prohibited `libs/kotaemon/tests/fixtures/knowledge_eval/local/sources/` tree was not accessed; all ingestion tests use generated temporary files.
+
+## GPT-6 Sol Medium review follow-up
+
+### Finding 1: anchors artifact filename
+
+Changed the generated-fixture assertion to require an empty `anchors.jsonl` and no `anchors.json`. Before changing the writer, the targeted test failed with `FileNotFoundError` while opening `draft-a/anchors.jsonl`. After the writer and report references were corrected, the same test passed: `1 passed, 6 warnings`.
+
+### Finding 2: preserve line and paragraph structure
+
+Added a generated Markdown regression with CRLF line endings, blank paragraphs, an intra-paragraph newline, decomposed Unicode, and enough text for overlapping chunks. Before changing normalization, the targeted test failed because `normalized_text` flattened `# Notes\r\n\r\n...` into space-separated text. The fix converts CRLF/CR to LF and applies NFC without collapsing whitespace. The test verifies paragraph and line boundaries, NFC output, exact equality with the existing configured `TokenSplitter.split_text` output, overlapping spans, in-bounds offsets, exact source slices, and repeatable chunk IDs. The targeted test passed: `1 passed, 5 warnings`.
+
+Final focused verification after both fixes:
+
+```text
+uv run pytest libs/kotaemon/tests/test_knowledge_eval_local_corpus.py libs/kotaemon/tests/test_knowledge_eval_local_ingest.py -q
+9 passed, 6 warnings in 4.54s
+```
+
+The six warnings remain dependency deprecations from PyMuPDF bindings and the installed cryptography provider. Final checks passed: Black reported 3 files unchanged, and `git diff --check` exited 0.
 
 ### Commit
 

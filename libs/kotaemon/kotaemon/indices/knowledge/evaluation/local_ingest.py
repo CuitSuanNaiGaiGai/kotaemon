@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -190,7 +191,8 @@ def _digest(value: bytes) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    return " ".join(text.split())
+    line_normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return unicodedata.normalize("NFC", line_normalized)
 
 
 def _reader_diagnostic(
@@ -695,7 +697,7 @@ def build_local_draft(
             source_units.append(unit)
             source_units_for_file.append(unit)
 
-            if not unit.normalized_text:
+            if not unit.normalized_text.strip():
                 empty_locators.append(
                     QualityLocator(
                         relative_path=unit.relative_path,
@@ -715,7 +717,7 @@ def build_local_draft(
                 )
             topic_candidates.extend(_topic_candidates(unit, source.suffix))
 
-            if unit.normalized_text:
+            if unit.normalized_text.strip():
                 try:
                     if splitter is None:
                         splitter = _token_splitter()
@@ -751,7 +753,7 @@ def build_local_draft(
 
         if source.suffix == ".pdf":
             empty_pages = sum(
-                not unit.normalized_text for unit in source_units_for_file
+                not unit.normalized_text.strip() for unit in source_units_for_file
             )
             page_quality.append(
                 PageQuality(
@@ -870,7 +872,7 @@ def build_local_draft(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "records.json").write_bytes(records_payload)
-    (output_dir / "anchors.json").write_bytes(anchors_payload)
+    (output_dir / "anchors.jsonl").write_bytes(anchors_payload)
 
     return DraftSummary(
         parsed_source_ids=tuple(parsed_source_ids),

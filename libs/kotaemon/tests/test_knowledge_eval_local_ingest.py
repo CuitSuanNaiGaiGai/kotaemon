@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import unicodedata
 from pathlib import Path
 
 import fitz
@@ -77,7 +78,8 @@ def test_build_local_draft_is_stable_and_reports_empty_or_failed_extraction(
     assert first.records_payload == second.records_payload
     assert first.anchors_payload == second.anchors_payload == b""
     assert (tmp_path / "draft-a" / "records.json").read_bytes() == first.records_payload
-    assert (tmp_path / "draft-a" / "anchors.json").read_bytes() == b""
+    assert (tmp_path / "draft-a" / "anchors.jsonl").read_bytes() == b""
+    assert not (tmp_path / "draft-a" / "anchors.json").exists()
     assert first.quality.empty_locators
     assert any(
         item.relative_path == "report.pdf" and item.locator.get("page_label") == "2"
@@ -211,3 +213,51 @@ def test_unmappable_chunk_offsets_keep_source_and_request_review(tmp_path, monke
     assert issue.relative_path == "notes.md"
     assert issue.reason == "offset_mapping_failed"
     assert issue.needs_review
+
+
+def test_normalization_preserves_paragraphs_and_baseline_splits(tmp_path):
+    from kotaemon.indices.knowledge.evaluation import local_ingest
+
+    root = tmp_path / "sources"
+    root.mkdir()
+    paragraphs = [
+        f"Paragraph {index}: "
+        + ("evidence token context " * 32)
+        + f"\r\nContinuation for paragraph {index}."
+        for index in range(40)
+    ]
+    source_text = (
+        "# Notes\r\n\r\n"
+        "Cafe\u0301 evidence on line one.\r\n"
+        "Continuation on line two.\r\n\r\n" + "\r\n\r\n".join(paragraphs)
+    )
+    (root / "notes.md").write_bytes(source_text.encode("utf-8"))
+
+    first = build_local_draft(root, tmp_path / "draft-a")
+    second = build_local_draft(root, tmp_path / "draft-b")
+
+    unit = next(unit for unit in first.source_units if unit.relative_path == "notes.md")
+    expected_normalized = unicodedata.normalize(
+        "NFC", unit.text.replace("\r\n", "\n").replace("\r", "\n")
+    )
+    assert unit.normalized_text == expected_normalized
+    assert "\n\n" in unit.normalized_text
+    assert "\nContinuation on line two." in unit.normalized_text
+    assert "Café evidence" in unit.normalized_text
+    assert "Cafe\u0301 evidence" not in unit.normalized_text
+
+    baseline_chunks = local_ingest._token_splitter()._obj.split_text(
+        unit.normalized_text
+    )
+    chunks = [chunk for chunk in first.chunks if chunk.relative_path == "notes.md"]
+    assert [chunk.text for chunk in chunks] == baseline_chunks
+    assert len(chunks) > 1
+    assert any(
+        left.char_end > right.char_start for left, right in zip(chunks, chunks[1:])
+    )
+    for chunk in chunks:
+        assert 0 <= chunk.char_start <= chunk.char_end <= len(unit.normalized_text)
+        assert chunk.text == unit.normalized_text[chunk.char_start : chunk.char_end]
+    assert [chunk.chunk_id for chunk in chunks] == [
+        chunk.chunk_id for chunk in second.chunks if chunk.relative_path == "notes.md"
+    ]
