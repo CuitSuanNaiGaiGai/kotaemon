@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 _SUPPORTED_SUFFIXES = frozenset({".pdf", ".docx", ".md", ".xlsx"})
 _HASH_CHUNK_SIZE = 1024 * 1024
@@ -72,3 +73,23 @@ def scan_sources(root: Path) -> tuple[SourceFile, ...]:
         )
 
     return tuple(sources)
+
+
+def canonical_sources(sources: Iterable[SourceFile]) -> tuple[SourceFile, ...]:
+    """Return one indexable inventory row for each exact-byte identity."""
+    return tuple(source for source in sources if source.duplicate_of is None)
+
+
+def unsupported_paths(root: Path) -> tuple[str, ...]:
+    """List unsupported regular-file paths without reading or hashing contents."""
+    root = Path(root)
+    paths = []
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.name == ".DS_Store" or path.name.startswith("~$"):
+            continue
+        if path.suffix.lower() in _SUPPORTED_SUFFIXES:
+            continue
+        paths.append(path.relative_to(root).as_posix())
+    return tuple(sorted(paths))

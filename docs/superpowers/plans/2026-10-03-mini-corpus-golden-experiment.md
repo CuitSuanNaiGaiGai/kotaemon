@@ -73,11 +73,12 @@ Expected: FAIL because `scan_sources` is not implemented.
 
 **Interfaces:**
 - `build_local_draft(root: Path, output_dir: Path, *, sample_ids: Sequence[str] | None = None) -> DraftSummary`
-- `DraftSummary` reports parsed source IDs, content-derived topic candidates, page/row extraction quality, baseline chunks, stable chunk IDs, and excluded inputs.
-- An evidence anchor has `anchor_id`, `query_id`, `source_id`, `source_sha256`, `locator`, `normalized_start`, `normalized_end`, and `evidence_sha256`; require at least one anchor for each relevant query/source pair. Anchor text remains only in ignored local review files.
-- `DraftSummary.records_payload` and `DraftSummary.anchors_payload` are deterministic UTF-8 byte strings used by the test to compare separate output directories.
+- `DraftSummary` reports parsed source IDs, content-derived topic candidates, page/row extraction quality, baseline chunks, stable chunk IDs, and excluded inputs. Topic candidates come from extracted headings/text only; missing candidates stay empty and marked for review rather than being inferred from directories.
+- Since this API has no query input, `DraftSummary.anchors_payload` is deterministically empty; do not invent query IDs or relevance labels during parsing. Query-linked anchors are created only after candidate questions and evidence spans exist, and Task 3 validates coverage for every relevant query/source pair.
+- `DraftSummary.records_payload` and `DraftSummary.anchors_payload` are deterministic UTF-8 byte strings used by the test to compare separate output directories. The records contain root-relative provenance only, never absolute reader paths.
+- `build_local_draft` writes only below its caller-supplied `output_dir`; production callers must pass a path under the ignored `local/draft/` tree. Synthetic CI tests may use pytest temporary directories.
 
-- [ ] **Step 1: Add failing generated-fixture tests** for Markdown headings, a generated PDF page, a DOCX paragraph, and two XLSX rows. Assert reader metadata survives chunking, chunk IDs repeat across runs, low/empty text is reported, and anchor offsets map to the correct source and locator.
+- [ ] **Step 1: Add failing generated-fixture tests** for Markdown headings, generated PDF pages, DOCX paragraphs, and XLSX rows. Assert reader locators survive chunking, chunk IDs repeat across runs, empty/failed extraction is reported, chunk offsets resolve to normalized source-unit text, duplicate bytes are parsed once, and the query-linked anchor payload stays empty at this stage. Cover an empty PDF page and a blank spreadsheet row in quality counts.
 
 ```python
 def test_build_local_draft_is_stable_and_reports_empty_pages(tmp_path):
@@ -97,7 +98,7 @@ Run: `uv run pytest libs/kotaemon/tests/test_knowledge_eval_local_ingest.py -q`
 
 Expected: FAIL because `build_local_draft` is not implemented.
 
-- [ ] **Step 3: Implement parsing with the existing normal PDF, Unstructured, text, and Excel row readers.** Use the main-branch token-only splitter at 1,024/256 to store baseline chunks; retain reader locations and content offsets. Put outputs only beneath the caller-provided ignored `local/draft/` directory.
+- [ ] **Step 3: Implement parsing with the existing normal PDF, Unstructured (`split_documents=True`), text, and Excel row readers.** Use the main-branch token-only splitter at 1,024/256 to store baseline chunks; retain reader locations and deterministic content offsets. Record parser/splitter configuration and objective extraction counts; report empty PDF pages and per-sheet extracted/blank row counts; flag empty or unusable locators for review without silently dropping nonempty sources. Do not invent a numeric low-quality threshold. Chunk IDs include a versioned configuration, source hash, locator/unit and chunk ordinals, and chunk-text digest. Put outputs only beneath the caller-supplied directory; the production CLI enforces that this resolves under ignored `local/draft/`, while generated-fixture tests use temporary paths.
 - [ ] **Step 4: Re-run the focused test** and verify stable source/chunk IDs and quality reporting.
 - [ ] **Step 5: Request GPT-6 Sol Medium review, resolve findings, and commit** as `feat: prepare local corpus review drafts`.
 
