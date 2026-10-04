@@ -440,4 +440,4 @@ git commit -m "feat: add local snapshot QA playground UI"
 
 - [x] Review the full branch diff against the PR base for spec compliance, private-data handling, URL restrictions, read-only behavior, and UI wiring; resolve the three Minor findings and obtain GPT-6 Sol Medium final approval (0 C/I/M).
 - [x] Run all three focused test files and the specified read-only evaluator regressions; inspect `git diff --check` and `git status --short`.
-- [ ] Push the reviewed commits to the existing feature branch and update PR #874. Do not add any ignored fixture, source document, model weight, question, answer, or trace to Git.
+- [x] Push the reviewed commits to the existing feature branch and update PR #874. Do not add any ignored fixture, source document, model weight, question, answer, or trace to Git.
