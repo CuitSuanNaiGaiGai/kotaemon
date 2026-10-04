@@ -18,10 +18,11 @@ Before model construction or run artifact creation, `run` calls the existing off
 - **Combined synthetic suite:** the six local-evaluation modules plus `test_knowledge_eval_source_metrics.py` — **167 passed, 6 warnings**.
 - **Style and diff:** Ruff and Black passed; `git diff --check` passed.
 - `python -m kotaemon.indices.knowledge.evaluation.local_cli --help` previously exited successfully and listed the five commands.
+- **Real-source candidate validation:** the ignored v1 draft contains **22 documents/paths, 306 source units, 473 chunks, 26 queries, 36 relevant query/source pairs, and 44 anchors**. Schema, payload/evidence hashes, scope complements, anchor coverage, and privacy checks passed; `load_local_snapshot(require_reviewed=False)` accepted the draft.
 
 ## Scope and review gate
 
-All test inputs are generated synthetic fixtures. No real source documents or source-derived artifacts were read or created. No model weights were downloaded or loaded; no real snapshot was frozen; no private-corpus metrics were run. GPT-6 Sol Medium approved the implementation after two re-review cycles. The next data step is to run `prepare-review` against actual sources and show the pre-approval package for manual review. Freezing gold, downloading/loading models, and metrics remain gated on explicit user approval of the reviewed labels.
+The CLI implementation tests use generated synthetic fixtures. Separately, the real-source candidate package remains in the Git-ignored `local/draft/v1` tree with `review_status="draft"`; it has not been committed or frozen. GPT-6 Sol Medium's independent package review is **Ready (0 C/I/M)**. The candidate is ready for user review in this turn. Explicit user approval of the final labels remains a prerequisite for freezing gold, downloading or loading models, and running retrieval metrics. None of those gated actions has occurred.
 
 ## Files
 
