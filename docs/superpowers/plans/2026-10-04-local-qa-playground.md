@@ -63,9 +63,11 @@ def test_open_playground_builds_index_once_and_does_not_write(tmp_path, monkeypa
 
 
 def test_retrieve_uses_first_five_sources_and_keeps_all_matching_chunks(fake_qa):
+    # Candidate source order is A, B, A, C, D, E, F, B, ... .
+    # The top-five source window is A-E; every A/B chunk remains visible.
     cards = fake_qa.retrieve("question")
-    assert [card.source_rank for card in cards] == [1, 1, 2, 3, 4, 5]
-    assert [card.chunk_rank for card in cards] == [1, 3, 4, 8, 11, 16]
+    assert [card.source_rank for card in cards] == [1, 2, 1, 3, 4, 5, 2]
+    assert [card.chunk_rank for card in cards] == [1, 2, 3, 4, 5, 6, 8]
 ```
 
 Add separate tests proving an invalid approval sidecar, modified snapshot payload, snapshot outside `local_root/snapshots/`, symlinked snapshot path, and non-baseline splitter each fail before embedding/index construction. Add a retrieval assertion that no more than 20 candidates are requested, and that candidate ranking is unchanged when multiple chunks from one source occur before another source. Build an ambiguous repeated-text snapshot using `source0_text="alpha unique target phrase " * 1500`, retrieve one chunk recorded in `bundle["unresolved_offsets"]`, and assert its locator is displayed without a `KeyError`.
