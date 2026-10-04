@@ -806,9 +806,21 @@ def stream(self, file_paths, **kwargs):
         )
 
 
-# Inside IndexPipeline.stream, after file-id and file-name resolution:
+# Inside IndexPipeline.stream, reject caller attempts to override Source identity
+# before file-id lookup, Source writes, loading, or indexing:
 def stream(self, file_path, reindex=False, knowledge_metadata=None, **kwargs):
-    if isinstance(file_path, Path):
+    reserved = {"file_id", "document_id", "collection_name"} & set(
+        knowledge_metadata or {}
+    )
+    if reserved:
+        raise ValueError(
+            "knowledge_metadata cannot override indexing-owned identity fields: "
+            + ", ".join(sorted(reserved))
+        )
+
+# The existing path resolution, file-id lookup, and Source writes follow this guard.
+# After that resolution, merge the ordinary metadata into the reader input:
+if isinstance(file_path, Path):
         extra_info = default_file_metadata_func(str(file_path))
         file_name = file_path.name
     else:

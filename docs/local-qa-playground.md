@@ -41,5 +41,8 @@ shows source rank, candidate chunk rank, relative source label, locator, score,
 and the exact retrieved chunk text. Clear removes the question, answer, and
 evidence from the page.
 
-Questions, answers, and retrieved text stay in the local UI process memory;
-the workbench does not write them to the snapshot or a trace file.
+For each Ask action, the question and exact retrieved evidence cards are sent
+over the loopback HTTP interface to the local Ollama process for generation;
+the generated answer is returned to the UI. The workbench does not write
+questions, answers, or evidence to the snapshot or its own trace file. The
+workbench does not control Ollama's process-memory or retention behavior.

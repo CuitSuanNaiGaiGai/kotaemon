@@ -364,7 +364,7 @@
       "lexical_statuses": [
         "not_used"
       ],
-      "trace_artifact_path": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace.json"
+      "trace_artifact_path": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace-k2.json"
     },
     {
       "id": "li-frontend",
@@ -554,7 +554,7 @@
       2
     ]
   },
-  "trace_artifact": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace.json",
+  "trace_artifact": "docs/superpowers/reports/artifacts/agent-retrieval-zhang-trace-k2.json",
   "authorization_parity": {
     "empty_allowlist": {
       "judged": false,

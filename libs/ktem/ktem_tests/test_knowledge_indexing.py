@@ -25,15 +25,19 @@ from kotaemon.storages import (
 
 
 class FixtureReader(BaseReader):
-    def __init__(self):
+    def __init__(self, side_effects=None):
         super().__init__()
         self.last_extra_info = None
+        self.side_effects = side_effects if side_effects is not None else []
+        self.metadata_overrides = {}
 
     def load_data(self, file, extra_info=None, **kwargs):
+        self.side_effects.append("load_data")
         self.last_extra_info = dict(extra_info or {})
         return [
             Document(
-                text="# Intro\n\nBody\n\n## Details\n\nDetails", metadata=extra_info
+                text="# Intro\n\nBody\n\n## Details\n\nDetails",
+                metadata={**(extra_info or {}), **self.metadata_overrides},
             )
         ]
 
@@ -91,14 +95,18 @@ def index_pipeline_fixture(monkeypatch, tmp_path):
         session.add(Source(id=source_id, note={"tokens": 42, "preserve": "existing"}))
         session.commit()
 
+    pipeline_side_effects = []
+
     class FixturePipeline(pipelines.IndexPipeline):
         def get_id_if_exists(self, file_path):
+            pipeline_side_effects.append("get_id_if_exists")
             return None
 
         def store_file(self, file_path):
+            pipeline_side_effects.append("store_file")
             return source_id
 
-    reader = FixtureReader()
+    reader = FixtureReader(side_effects=pipeline_side_effects)
     docstore = InMemoryDocumentStore()
     vectorstore = CapturingVectorStore()
     pipeline = FixturePipeline(
@@ -183,6 +191,65 @@ def test_stream_persists_caller_knowledge_metadata(index_pipeline_fixture, tmp_p
         "virtual_path": "/Interns/App/Zhang San",
         "document_name": "Zhang San.md",
         "entity": {},
+    }
+
+
+@pytest.mark.parametrize("reserved_key", ["file_id", "document_id", "collection_name"])
+def test_stream_rejects_caller_identity_metadata_before_indexing(
+    index_pipeline_fixture, tmp_path, reserved_key
+):
+    pipeline, reader, docstore, vectorstore, _, get_source = index_pipeline_fixture
+    input_path = tmp_path / "reserved.md"
+    input_path.write_text("fixture", encoding="utf-8")
+    original_note = get_source().note
+
+    with pytest.raises(ValueError, match=reserved_key):
+        consume_stream(
+            pipeline.stream(
+                input_path,
+                knowledge_metadata={reserved_key: "caller-controlled"},
+            )
+        )
+
+    assert reader.side_effects == []
+    assert reader.last_extra_info is None
+    assert docstore.get_all() == []
+    assert vectorstore.metadata_by_id == {}
+    assert get_source().note == original_note
+
+
+def test_stream_preserves_custom_metadata_and_trusted_reader_identity(
+    index_pipeline_fixture, tmp_path
+):
+    pipeline, reader, docstore, _, _, get_source = index_pipeline_fixture
+    input_path = tmp_path / "fixture.md"
+    input_path.write_text("fixture", encoding="utf-8")
+    reader.metadata_overrides = {"document_id": "reader-issued-document"}
+    custom_metadata = {
+        "source_type": "wiki",
+        "virtual_path": "/Interns/App/Fixture",
+        "document_name": "logical-fixture.md",
+        "entity": {"owner": "Zhang San"},
+        "tags": ["app", "intern"],
+        "page": 7,
+    }
+
+    consume_stream(pipeline.stream(input_path, knowledge_metadata=custom_metadata))
+
+    stored = docstore.get_all()
+    assert stored
+    assert all(
+        item.metadata["document_id"] == "reader-issued-document" for item in stored
+    )
+    assert all(
+        {key: item.metadata[key] for key in custom_metadata} == custom_metadata
+        for item in stored
+    )
+    assert get_source().note["knowledge"] == {
+        "source_type": "wiki",
+        "virtual_path": "/Interns/App/Fixture",
+        "document_name": "logical-fixture.md",
+        "entity": {"owner": "Zhang San"},
     }
 
 

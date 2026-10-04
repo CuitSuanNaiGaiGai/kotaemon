@@ -50,6 +50,9 @@ from .base import BaseFileIndexIndexing, BaseFileIndexRetriever
 from .knowledge_service import create_file_knowledge_service
 
 logger = logging.getLogger(__name__)
+_INDEXING_IDENTITY_METADATA_KEYS = frozenset(
+    {"file_id", "document_id", "collection_name"}
+)
 
 
 @lru_cache
@@ -668,6 +671,15 @@ class IndexPipeline(BaseComponent):
         knowledge_metadata: dict | None = None,
         **kwargs,
     ) -> Generator[Document, None, tuple[str, list[Document]]]:
+        reserved_metadata = _INDEXING_IDENTITY_METADATA_KEYS.intersection(
+            knowledge_metadata or {}
+        )
+        if reserved_metadata:
+            raise ValueError(
+                "knowledge_metadata cannot override indexing-owned identity fields: "
+                + ", ".join(sorted(reserved_metadata))
+            )
+
         # check if the file is already indexed
         if isinstance(file_path, Path):
             file_path = file_path.resolve()
