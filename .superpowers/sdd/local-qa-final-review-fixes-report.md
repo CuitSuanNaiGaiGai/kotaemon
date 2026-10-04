@@ -71,3 +71,9 @@ print(
 Result: `PASS: K=2 Zhang references resolve to the distinct K=2 trace; K=5 trace remains candidate_k=5.`
 
 No Ollama process or network request was used. The scoped retrieval tests created two Chroma output directories named from the patched `Embeddings.create` mock; both were verified to contain only test-generated Chroma files and removed.
+
+## Doc-only wording follow-up
+
+At follow-up HEAD `56af37b3`, narrowed the generation-flow sentence in `docs/local-qa-playground.md` to match `answer_question`: only a non-empty question with retrieved evidence is sent to Ollama; only a successful generation returns an answer; empty input, no evidence, and generation failure are described as their actual bypass/error outcomes. Kept the snapshot/own-trace no-write and Ollama retention-scope statements.
+
+Validation: reviewed the wording against the `answer_question` branches and ran `git diff --check` successfully. No tests were rerun for this documentation-only change, and no Ollama or network request was made.

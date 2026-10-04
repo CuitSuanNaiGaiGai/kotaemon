@@ -41,8 +41,11 @@ shows source rank, candidate chunk rank, relative source label, locator, score,
 and the exact retrieved chunk text. Clear removes the question, answer, and
 evidence from the page.
 
-For each Ask action, the question and exact retrieved evidence cards are sent
-over the loopback HTTP interface to the local Ollama process for generation;
-the generated answer is returned to the UI. The workbench does not write
-questions, answers, or evidence to the snapshot or its own trace file. The
-workbench does not control Ollama's process-memory or retention behavior.
+Only when an Ask action has a non-empty question and retrieval finds evidence
+are the question and corresponding evidence cards sent over the loopback HTTP
+interface to the local Ollama process for generation. A successfully generated
+answer is returned to the UI. Empty questions and searches with no evidence skip
+generation; generation failures display an error instead of a generated answer.
+The workbench does not write questions, answers, or evidence to the snapshot or
+its own trace file. It does not control Ollama's process-memory or retention
+behavior.
