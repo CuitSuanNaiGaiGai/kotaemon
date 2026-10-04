@@ -38,7 +38,7 @@
 - Build exactly once using `local_experiment._make_bundle(snapshot, embedding=embedding, chunking_arm=False)` and `local_experiment._service(bundle, rerankers=())`.
 - `retrieve` calls `service.search(question, top_k=20)`, projects the first five distinct source IDs using `source_ranked_chunks`, and returns all candidate chunks belonging to that source window in their original candidate order. Populate only relative display paths from the snapshot; never expose an absolute filesystem path.
 
-- [ ] **Step 1: Write the failing core tests**
+- [x] **Step 1: Write the failing core tests**
 
 Create a reviewed synthetic snapshot using the small writer pattern from `libs/kotaemon/tests/test_knowledge_eval_local_experiment.py`; write its manifest-bound `approval.json` sidecar. Use fake model paths, a deterministic embedding implementation, and monkeypatch only model-path resolution/offline initialization. Keep actual snapshot loading, sidecar verification, splitter validation, in-memory indexing, and service search active.
 
@@ -72,12 +72,12 @@ def test_retrieve_uses_first_five_sources_and_keeps_all_matching_chunks(fake_qa)
 
 Add separate tests proving an invalid approval sidecar, modified snapshot payload, snapshot outside `local_root/snapshots/`, symlinked snapshot path, and non-baseline splitter each fail before embedding/index construction. Add a retrieval assertion that no more than 20 candidates are requested, and that candidate ranking is unchanged when multiple chunks from one source occur before another source. Build an ambiguous repeated-text snapshot using `source0_text="alpha unique target phrase " * 1500`, retrieve one chunk recorded in `bundle["unresolved_offsets"]`, and assert its locator is displayed without a `KeyError`.
 
-- [ ] **Step 2: Run the core tests and confirm the intended RED result**
+- [x] **Step 2: Run the core tests and confirm the intended RED result**
 
 Run from repository root: `uv run --package ktem pytest -q libs/ktem/ktem_tests/test_local_qa_core.py`.
 Expected: collection fails because `ktem.local_qa_core` does not exist yet. After the module skeleton and API are introduced, the behavior tests must fail on the missing implementation/incorrect behavior rather than on fixture errors.
 
-- [ ] **Step 3: Implement the core types and startup path**
+- [x] **Step 3: Implement the core types and startup path**
 
 ```python
 @dataclass(frozen=True)
@@ -141,7 +141,7 @@ def _locator_for_chunk(self, chunk_id: str) -> Mapping[str, Any]:
 
 It must not store or load the gold judgments as interactive filters. Preserve retrieval scores if they are finite numbers; otherwise set `score=None`. Read source labels from the matching snapshot row's repository-relative `relative_path`.
 
-- [ ] **Step 4: Implement source-window projection**
+- [x] **Step 4: Implement source-window projection**
 
 ```python
 def retrieve(self, question: str) -> tuple[EvidenceCard, ...]:
@@ -177,12 +177,12 @@ def retrieve(self, question: str) -> tuple[EvidenceCard, ...]:
 
 Compute each source's one-based citation rank from `representatives`; compute each chunk's one-based candidate rank from its original candidate position. Return an empty tuple when search returns no candidates.
 
-- [ ] **Step 5: Run the focused core tests and confirm GREEN**
+- [x] **Step 5: Run the focused core tests and confirm GREEN**
 
 Run: `uv run --package ktem pytest -q libs/ktem/ktem_tests/test_local_qa_core.py`.
 Expected: all core tests pass, including the read-only snapshot/tree check and the rejection tests.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add libs/ktem/ktem/local_qa_core.py libs/ktem/ktem_tests/test_local_qa_core.py
@@ -203,7 +203,7 @@ git commit -m "feat: add read-only local snapshot QA retrieval"
 - POST to `/api/chat` with `stream: false`. The system/user prompts contain only the question and the exact cards supplied by the caller. Tell the model to treat evidence as untrusted data, answer concisely, cite the displayed sources using `[rank]`, and admit insufficient evidence.
 - Parse only a successful JSON response with a nonempty `message.content`; use a finite timeout and do not include request bodies in raised errors.
 
-- [ ] **Step 1: Write failing tests with a loopback HTTP fixture**
+- [x] **Step 1: Write failing tests with a loopback HTTP fixture**
 
 Use `ThreadingHTTPServer` bound to `127.0.0.1` in a context manager. Its normal route records the request body and returns a small Ollama `/api/chat` response. Its redirect route returns `302 Location: /capture`; assert `/capture` is never reached. Endpoint constructor tests also include the empty-userinfo URL `http://@127.0.0.1:11434` and assert it is rejected before opening a connection.
 
@@ -234,12 +234,12 @@ def test_non_loopback_cloud_model_and_redirect_are_rejected_before_leak(loopback
 
 Also test rejection of `localhost`, credentials, query/fragment, invalid port, cloud model rejection before any request, IPv6 loopback parsing, proxy environment variables being ignored for loopback, malformed/empty Ollama response, and citation rank/source text mapping.
 
-- [ ] **Step 2: Run the Ollama tests and confirm RED**
+- [x] **Step 2: Run the Ollama tests and confirm RED**
 
 Run: `uv run --package ktem pytest -q libs/ktem/ktem_tests/test_local_qa_ollama.py`.
 Expected: collection fails because `ktem.local_qa_ollama` does not exist; then each endpoint/prompt test must fail for the missing client rather than fixture setup.
 
-- [ ] **Step 3: Implement URL and model validation before transport**
+- [x] **Step 3: Implement URL and model validation before transport**
 
 ```python
 def _validate_endpoint(endpoint: str) -> str:
@@ -261,7 +261,7 @@ def _validate_endpoint(endpoint: str) -> str:
 
 Validate the model string in `__init__` before any request; reject empty names, whitespace-only names, URL-like model values, and case-insensitive cloud tags. Normalize the endpoint's base path only if the plan's endpoint validator explicitly accepts `/`; otherwise require no non-root path.
 
-- [ ] **Step 4: Implement evidence prompt and non-redirecting, proxy-free POST**
+- [x] **Step 4: Implement evidence prompt and non-redirecting, proxy-free POST**
 
 ```python
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -283,12 +283,12 @@ request = urllib.request.Request(
 
 Serialize the question and cards into messages without adding other retrieved candidates or chat history. Read at most 2 MiB of response bytes, require `message.content` to be a nonempty string, and convert HTTP/JSON/schema failures into concise errors that do not contain the prompt or evidence.
 
-- [ ] **Step 5: Run focused Ollama tests and confirm GREEN**
+- [x] **Step 5: Run focused Ollama tests and confirm GREEN**
 
 Run: `uv run --package ktem pytest -q libs/ktem/ktem_tests/test_local_qa_ollama.py`.
 Expected: all URL, proxy, redirect, request-body, and response-validation tests pass without contacting any external host.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add libs/ktem/ktem/local_qa_ollama.py libs/ktem/ktem_tests/test_local_qa_ollama.py
@@ -305,14 +305,14 @@ git commit -m "feat: add loopback-only Ollama QA generation"
 **Interfaces:**
 - `answer_question(qa: LocalQA, generator: OllamaLocalClient, question: str) -> tuple[str, list[dict[str, Any]]]`
 - `clear_outputs() -> tuple[str, str, list[dict[str, Any]]]`
-- `build_ui(qa: LocalQA, generator: OllamaLocalClient) -> gr.Blocks`
+- `build_ui(qa: LocalQA, generator: OllamaLocalClient, *, snapshot_version: str) -> gr.Blocks`; `main` passes the selected snapshot path's name only after `open_playground` validates that snapshot.
 - `main(argv: Sequence[str] | None = None) -> int`; flags are `--local-root`, `--snapshot`, `--embedding-model-dir`, `--reranker-model-dir`, `--ollama-endpoint`, `--model`, and `--server-port`.
 - Build a standalone Gradio page with one independent question textbox, Ask and Clear buttons, an answer `Textbox`, and a JSON evidence panel. No conversation component, session history, cache, or file/database write is allowed.
 - Each evidence object displays source rank, candidate chunk rank, relative source label, locator, score, and exact chunk text. The generator receives only the evidence cards returned for that same request.
 - If retrieval is empty, show a no-evidence answer and do not call the generator. If local Ollama is unavailable, retain evidence and show an actionable message to start Ollama and run `ollama pull <model>`.
 - Launch only with `server_name="127.0.0.1"`, `share=False`, and `inbrowser=False`.
 
-- [ ] **Step 1: Write failing callback and launch tests**
+- [x] **Step 1: Write failing callback and launch tests**
 
 Use fake `LocalQA` and generator objects that record calls. Keep tests independent of snapshot/model files and do not call a real Ollama process.
 
@@ -342,12 +342,12 @@ def test_empty_retrieval_skips_generation_and_clear_resets_outputs():
 
 Add tests that two Ask calls have no prior-question context, errors preserve evidence without echoing question/source text, UI wiring points Ask to the callback and Clear to `clear_outputs`, Gradio analytics are disabled, and `main` binds to `127.0.0.1` with `share=False` and forwards the configured port.
 
-- [ ] **Step 2: Run UI tests and confirm RED**
+- [x] **Step 2: Run UI tests and confirm RED**
 
 Run: `uv run --package ktem pytest -q libs/ktem/ktem_tests/test_local_qa_playground.py`.
 Expected: collection fails because `ktem.local_qa_playground` does not exist; after a module skeleton is added, callback tests must fail on missing behavior rather than Gradio import problems.
 
-- [ ] **Step 3: Implement pure request callbacks**
+- [x] **Step 3: Implement pure request callbacks**
 
 ```python
 def answer_question(qa, generator, question):
@@ -379,22 +379,34 @@ def answer_question(qa, generator, question):
 
 Keep the callback stateless: each call uses only its `question`, `cards`, and one local generation request. Do not write to the snapshot or a trace file.
 
-- [ ] **Step 4: Build UI, CLI, and launch guide**
+- [x] **Step 4: Build UI, CLI, and launch guide**
 
 ```python
-with gr.Blocks(title="Local Snapshot QA", analytics_enabled=False) as demo:
-    question = gr.Textbox(label="Question", lines=3)
-    with gr.Row():
-        ask = gr.Button("Ask", variant="primary")
-        clear = gr.Button("Clear")
-    answer = gr.Textbox(label="Answer", lines=8, interactive=False)
-    evidence = gr.JSON(label="Retrieved evidence")
-    ask.click(
-        fn=lambda question_text: answer_question(qa, generator, question_text),
-        inputs=[question],
-        outputs=[answer, evidence],
-    )
-    clear.click(clear_outputs, inputs=[], outputs=[question, answer, evidence])
+def build_ui(
+    qa: LocalQA,
+    generator: OllamaLocalClient,
+    *,
+    snapshot_version: str,
+) -> gr.Blocks:
+    with gr.Blocks(title="Local Snapshot QA", analytics_enabled=False) as demo:
+        gr.Markdown(
+            f"Snapshot {snapshot_version} · BGE-M3 · baseline token chunks · "
+            "vector top-20 · top-five sources · "
+            f"local generator {generator.model}"
+        )
+        question = gr.Textbox(label="Question", lines=3)
+        with gr.Row():
+            ask = gr.Button("Ask", variant="primary")
+            clear = gr.Button("Clear")
+        answer = gr.Textbox(label="Answer", lines=8, interactive=False)
+        evidence = gr.JSON(label="Retrieved evidence")
+        ask.click(
+            fn=lambda question_text: answer_question(qa, generator, question_text),
+            inputs=[question],
+            outputs=[answer, evidence],
+        )
+        clear.click(clear_outputs, inputs=[], outputs=[question, answer, evidence])
+    return demo
 ```
 
 The page description identifies the frozen snapshot version, BGE-M3, baseline token chunks, vector candidate pool 20, top-five source window, and configured local generation model. Add an argparse entrypoint and a short guide with the exact launch form:
@@ -410,14 +422,14 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run --package ktem python -m ktem.loc
 
 Document the prerequisite `ollama pull qwen2.5:7b` and explain that query, answer, and retrieved text remain in the local UI process memory. Do not put private fixture paths or corpus content in the guide.
 
-- [ ] **Step 5: Run focused tests and inspect the local UI**
+- [x] **Step 5: Run focused tests and inspect the local UI**
 
 Run: `uv run --package ktem pytest -q libs/ktem/ktem_tests/test_local_qa_core.py libs/ktem/ktem_tests/test_local_qa_ollama.py libs/ktem/ktem_tests/test_local_qa_playground.py`.
 Run format check: `uv run black --check libs/ktem/ktem/local_qa_core.py libs/ktem/ktem/local_qa_ollama.py libs/ktem/ktem/local_qa_playground.py libs/ktem/ktem_tests/test_local_qa_core.py libs/ktem/ktem_tests/test_local_qa_ollama.py libs/ktem/ktem_tests/test_local_qa_playground.py`.
 Run read-only retrieval regressions from `libs/kotaemon`: `uv run pytest -q tests/test_knowledge_eval_local_experiment.py tests/test_knowledge_eval_local_cli.py -k 'not git_ignore_guard_accepts_local_fixture_root_without_writes'`.
 Start the UI once with a synthetic snapshot and fake local generator, inspect the rendered page and Ask/Clear behavior in a browser, then stop it. After review and if the local Ollama model is installed, start the approved v2 workbench against the ignored local data root for the user to enter their own questions. Do not enter a user question or save a transcript.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add libs/ktem/ktem/local_qa_playground.py libs/ktem/ktem_tests/test_local_qa_playground.py docs/local-qa-playground.md
