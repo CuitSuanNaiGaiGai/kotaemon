@@ -50,6 +50,7 @@ def _refresh_v1_manifest(case):
     manifest = {
         "snapshot_version": "v1",
         "review_status": "approved",
+        "source_root": case["source_root"],
         "payload_sha256": {
             name: hashlib.sha256((case["v1_dir"] / name).read_bytes()).hexdigest()
             for name in payload_names
@@ -218,7 +219,7 @@ def _make_case(tmp_path):
     v1_anchors_bytes = _jsonl_bytes(v1_anchors)
     (v1_dir / "judgments.jsonl").write_bytes(v1_judgments_bytes)
     (v1_dir / "anchors.jsonl").write_bytes(v1_anchors_bytes)
-    case = {"v1_dir": v1_dir}
+    case = {"v1_dir": v1_dir, "source_root": "synthetic/knowledge-eval"}
     _refresh_v1_manifest(case)
     manifest_bytes = case["manifest_bytes"]
 
@@ -245,6 +246,7 @@ def _make_case(tmp_path):
         "v1_anchors_bytes": v1_anchors_bytes,
         "manifest_bytes": manifest_bytes,
         "additions": additions,
+        "source_root": "synthetic/knowledge-eval",
     }
 
 
@@ -344,6 +346,16 @@ def test_build_candidate_preserves_v1_prefixes_and_writes_deterministic_metadata
     assert manifest["snapshot_version"] == "v2-draft"
     assert manifest["review_status"] == "draft"
     assert manifest["review_date"] is None
+    local_cli = importlib.import_module(
+        "kotaemon.indices.knowledge.evaluation.local_cli"
+    )
+    reviewed_manifest, _ = local_cli._reviewed_manifest_for_freeze(
+        first_output, version="v2", approved_at="2026-10-04"
+    )
+    assert manifest["source_root"] == case["source_root"]
+    assert reviewed_manifest["source_provenance"][0]["repository_path"] == (
+        f"{case['source_root']}/source-00.md"
+    )
     assert manifest["parent_manifest_sha256"] == hashlib.sha256(
         case["manifest_bytes"]
     ).hexdigest()
@@ -559,6 +571,48 @@ def test_build_candidate_rejects_unapproved_or_wrong_v1_parent(tmp_path, field, 
 
     with pytest.raises(ValueError, match="v1|approved|snapshot"):
         _build(case, tmp_path / "draft")
+
+
+@pytest.mark.parametrize(
+    "source_root",
+    [
+        None,
+        "",
+        "/synthetic/knowledge-eval",
+        "synthetic\\knowledge-eval",
+        "synthetic/../knowledge-eval",
+        "./synthetic/knowledge-eval",
+        "synthetic//knowledge-eval",
+        "C:/synthetic/knowledge-eval",
+    ],
+    ids=[
+        "missing",
+        "empty",
+        "absolute",
+        "backslash",
+        "parent",
+        "dot-component",
+        "unnormalized",
+        "drive",
+    ],
+)
+def test_build_candidate_rejects_unsafe_v1_source_root_before_writing(
+    tmp_path, source_root
+):
+    case = _make_case(tmp_path)
+    manifest_path = case["v1_dir"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    if source_root is None:
+        del manifest["source_root"]
+    else:
+        manifest["source_root"] = source_root
+    manifest_path.write_bytes(_json_bytes(manifest))
+    output_dir = tmp_path / "draft"
+
+    with pytest.raises(ValueError, match="source_root"):
+        _build(case, output_dir)
+
+    assert not output_dir.exists()
 
 
 def test_validate_candidate_rejects_a_modified_v1_parent(tmp_path):

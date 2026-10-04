@@ -761,41 +761,41 @@ def _reviewed_manifest_for_freeze(
     source_rows = records.get("sources")
     if not isinstance(source_rows, list):
         raise ValueError("records.sources must be a list")
-    manifest.update(
-        {
-            "snapshot_version": version,
-            "schema_versions": {"records": 1, "judgments": 1, "anchors": 1},
-            "payload_sha256": {
-                name: _sha256(payload) for name, payload in payloads.items()
-            },
-            "review_status": "approved",
-            "review_date": approved_at,
-            "source_provenance": [
-                {
-                    "source_id": source["source_id"],
-                    "repository_path": f"{source_root}/{source['relative_path']}",
-                    "sha256": source["sha256"],
-                }
+    manifest = {
+        "schema_version": 1,
+        "snapshot_version": version,
+        "schema_versions": {"records": 1, "judgments": 1, "anchors": 1},
+        "payload_sha256": {
+            name: _sha256(payload) for name, payload in payloads.items()
+        },
+        "review_status": "approved",
+        "review_date": approved_at,
+        "source_root": source_root,
+        "source_provenance": [
+            {
+                "source_id": source["source_id"],
+                "repository_path": f"{source_root}/{source['relative_path']}",
+                "sha256": source["sha256"],
+            }
+            for source in source_rows
+        ],
+        "parser_configuration": records["parser_configuration"],
+        "splitter_configuration": records["splitter_configuration"],
+        "counts": {
+            "source_paths": len(source_rows),
+            "documents": sum(
+                source["duplicate_of"] is None
+                and source["status"] == "parsed"
+                and source["source_id"]
+                in {chunk["source_id"] for chunk in records["chunks"]}
                 for source in source_rows
-            ],
-            "parser_configuration": records["parser_configuration"],
-            "splitter_configuration": records["splitter_configuration"],
-            "counts": {
-                "source_paths": len(source_rows),
-                "documents": sum(
-                    source["duplicate_of"] is None
-                    and source["status"] == "parsed"
-                    and source["source_id"]
-                    in {chunk["source_id"] for chunk in records["chunks"]}
-                    for source in source_rows
-                ),
-                "source_units": len(records["source_units"]),
-                "chunks": len(records["chunks"]),
-                "queries": len(judgments),
-                "anchors": len(anchors),
-            },
-        }
-    )
+            ),
+            "source_units": len(records["source_units"]),
+            "chunks": len(records["chunks"]),
+            "queries": len(judgments),
+            "anchors": len(anchors),
+        },
+    }
     return manifest, payloads
 
 

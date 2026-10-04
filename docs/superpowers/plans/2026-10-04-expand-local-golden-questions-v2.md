@@ -47,12 +47,12 @@
 - Output `question_metadata.jsonl` has one row per query with exactly `query_id`, `topic`, `query_type`, and `relevant_source_count`; the count is derived from the judgment `relevant_ids`.
 - Output `manifest.json` has `snapshot_version: "v2-draft"`, `review_status: "draft"`, `review_date: null`, `parent_manifest_sha256`, counts including `new_queries`, and `payload_sha256` entries for `records.json`, `judgments.jsonl`, `anchors.jsonl`, and `question_metadata.jsonl`.
 
-- [ ] **Step 1: Write failing tests first.** Build temporary synthetic v1 data with 22 sources, 26 judgment rows, 44 valid anchors, and normalized source units; write 54 synthetic additions matching the stated type quotas and at least 16 multi-source cases; create 26 metadata rows. Assert `build_candidate(...)` returns `{"documents": 22, "queries": 80, "new_queries": 54}` and writes v1 judgments/anchors as byte-identical prefixes. Add focused negative tests for duplicate IDs/prompts, unknown sources, missing relevant-pair anchors, invalid offsets, mismatched source/evidence hashes, wrong quotas, and a modified v1 parent. Create an empty `local_candidate.py` module only after the test file so pytest can collect the tests; do not define the requested functions yet.
-- [ ] **Step 2: Verify RED.** Run `pytest libs/kotaemon/tests/fixtures/knowledge_eval/test_local_candidate.py -q`; confirm the tests fail by calling the missing `build_candidate`/`validate_candidate` API, with no import or fixture errors.
-- [ ] **Step 3: Implement the smallest builder and validator.** Copy `records.json` bytes; retain the exact v1 JSONL bytes as prefixes in v2 judgments and anchors; append schema-valid rows; derive disallowed IDs from the selected topic group; derive each anchor locator and hashes from the referenced v1 source unit; write deterministic `question_metadata.jsonl` and `manifest.json` with hashes for the four payload files. The validator must reject any changed v1 prefix, changed 22-source hash set, invalid count/ID/type quota, duplicate normalized prompt, a relevant source outside its declared scope, missing anchor, or offset/hash mismatch. Build twice from identical inputs and compare output hashes to prove deterministic output.
-- [ ] **Step 4: Verify GREEN.** Re-run the focused pytest command and require all synthetic tests to pass with no warnings.
-- [ ] **Step 5: Commit only the tracked generic helper and synthetic tests.** Do not force-add or commit anything under `local/`.
-- [ ] **Step 6: Sol Medium reviews the task diff** for contract compliance and quality; fix and re-review any Critical or Important finding before proceeding.
+- [x] **Step 1: Write failing tests first.** Build temporary synthetic v1 data with 22 sources, 26 judgment rows, 44 valid anchors, and normalized source units; write 54 synthetic additions matching the stated type quotas and at least 16 multi-source cases; create 26 metadata rows. Assert `build_candidate(...)` returns `{"documents": 22, "queries": 80, "new_queries": 54}` and writes v1 judgments/anchors as byte-identical prefixes. Add focused negative tests for duplicate IDs/prompts, unknown sources, missing relevant-pair anchors, invalid offsets, mismatched source/evidence hashes, wrong quotas, and a modified v1 parent. Create an empty `local_candidate.py` module only after the test file so pytest can collect the tests; do not define the requested functions yet.
+- [x] **Step 2: Verify RED.** Run `pytest libs/kotaemon/tests/fixtures/knowledge_eval/test_local_candidate.py -q`; confirm the tests fail by calling the missing `build_candidate`/`validate_candidate` API, with no import or fixture errors.
+- [x] **Step 3: Implement the smallest builder and validator.** Copy `records.json` bytes; retain the exact v1 JSONL bytes as prefixes in v2 judgments and anchors; append schema-valid rows; derive disallowed IDs as the complement of each row's `scope_source_ids`; derive each anchor locator and hashes from the referenced v1 source unit; write deterministic `question_metadata.jsonl` and `manifest.json` with hashes for the four payload files. The validator must reject any changed v1 prefix, changed 22-source hash set, invalid count/ID/type quota, duplicate normalized prompt, a relevant source outside its declared scope, missing anchor, or offset/hash mismatch. Build twice from identical inputs and compare output hashes to prove deterministic output.
+- [x] **Step 4: Verify GREEN.** Re-run the focused pytest command and require all synthetic tests to pass with no warnings.
+- [x] **Step 5: Commit only the tracked generic helper and synthetic tests.** Do not force-add or commit anything under `local/`.
+- [x] **Step 6: Sol Medium reviews the task diff** for contract compliance and quality; fix and re-review any Critical or Important finding before proceeding.
 
 ## Task 2: Author and assemble local question additions
 
@@ -64,13 +64,13 @@ Root performs this source-reading step locally; no subagent receives raw source 
 - Create: ignored `libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v2/legacy_metadata.jsonl`
 - Create: ignored v2 candidate outputs from Task 1
 
-- [ ] **Step 1: Assign 54 distinct questions to the approved five query types and the existing four source-scope topics.** Each question must be answerable from cited source material, not just its title or filename.
-- [ ] **Step 2: Cover every supported source in at least one new relevant judgment and create 16 or more multi-source additions where the corpus supports the relationship.** Keep the multi-source questions within a valid source-scope topic.
-- [ ] **Step 3: Select one or more concise evidence spans per relevant source from the correct normalized source unit; store only unit IDs and offsets.**
-- [ ] **Step 4: Classify all 26 legacy questions by topic and query type without changing their judgment rows.**
-- [ ] **Step 5: Run the builder, then run the validator.** Require 22 source documents, 80 queries, 54 additions, complete relevant-pair anchors, approved type quotas, and no v1 changes.
-- [ ] **Step 6: Locally inspect all new questions and anchors for answerability, scope, ambiguity, near-duplicates, and source support.** No source text is sent to external services.
-- [ ] **Step 7: Sol Medium reviews the non-source-bearing structural report and coverage totals.** Root verifies every anchor against local source text; reviewer output cannot replace this local grounding check.
+- [x] **Step 1: Assign 54 distinct questions to the approved five query types and the existing four source-scope topics.** Each question must be answerable from cited source material, not just its title or filename.
+- [x] **Step 2: Cover every supported source in at least one new relevant judgment and create 16 or more multi-source additions where the corpus supports the relationship.** Keep the multi-source questions within a valid source-scope topic.
+- [x] **Step 3: Select one or more concise evidence spans per relevant source from the correct normalized source unit; store only unit IDs and offsets.**
+- [x] **Step 4: Classify all 26 legacy questions by topic and query type without changing their judgment rows.**
+- [x] **Step 5: Run the builder, then run the validator.** Require 22 source documents, 80 queries, 54 additions, complete relevant-pair anchors, approved type quotas, and no v1 changes.
+- [x] **Step 6: Locally inspect all new questions and anchors for answerability, scope, ambiguity, near-duplicates, and source support.** No source text is sent to external services.
+- [x] **Step 7: Sol Medium reviews the non-source-bearing structural report and coverage totals.** Root verifies every anchor against local source text; reviewer output cannot replace this local grounding check.
 
 ## Task 3: Prepare v2 for user review
 
@@ -78,14 +78,24 @@ Root performs this source-reading step locally; no subagent receives raw source 
 - Modify ignored `libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v2/REVIEW.md`
 - Modify ignored `libs/kotaemon/tests/fixtures/knowledge_eval/local/draft/v2/manifest.json` only through the builder
 
-- [ ] **Step 1: Produce a review table for all 54 new questions** with question ID, topic, query type, relevant document display labels, and a concise evidence-location description; do not include raw source spans.
-- [ ] **Step 2: Record exact source/query/anchor counts, type coverage, multi-source count, build command, validation output, and SHA-256 manifest.** Mark status as `draft` and leave approval fields empty.
-- [ ] **Step 3: Confirm the v1 snapshot manifest and payload hashes are unchanged.**
-- [ ] **Step 4: Present the v2 candidate for user review.** Stop before freezing v2 or rerunning any retrieval arm.
+- [x] **Step 1: Produce a review table for all 54 new questions** with question ID, topic, query type, relevant document display labels, and a concise evidence-location description; do not include raw source spans.
+- [x] **Step 2: Record exact source/query/anchor counts, type coverage, multi-source count, build command, validation output, and SHA-256 manifest.** Mark status as `draft` and leave approval fields empty.
+- [x] **Step 3: Confirm the v1 snapshot manifest and payload hashes are unchanged.**
+- [x] **Step 4: Present the v2 candidate for user review.** Stop before freezing v2 or rerunning any retrieval arm.
+
+## Task 4: Freeze the approved v2 set and run the four-arm evaluation
+
+The user approved the 80-question candidate and the frozen source-level metrics on 2026-10-04. Source-derived data, the frozen snapshot, model files, per-query report, and traces remain in the Git-ignored local fixture tree.
+
+- [x] **Step 1: Close the freeze integration gaps with TDD.** The candidate builder now validates and carries forward the v1 manifest's safe `source_root`; the freeze command constructs the exact strict snapshot manifest schema and drops draft-only fields. Synthetic candidate tests: 37 passed. Synthetic freeze tests: 3 passed; broader local CLI tests: 32 passed, 1 protected-fixture test deselected.
+- [x] **Step 2: Revalidate the v2 candidate and preserve reviewed content.** Validation reported 22 documents, 80 queries, and 54 additions. A byte comparison found only the candidate `manifest.json` stale; `records.json`, `judgments.jsonl`, `anchors.jsonl`, and `question_metadata.jsonl` matched the reviewed inputs unchanged.
+- [x] **Step 3: Freeze v2 and load it independently.** The approved snapshot loaded with 22 documents, 80 questions, and 139 anchors; its fingerprint is recorded in `docs/superpowers/reports/local-knowledge-eval-v2.md`.
+- [x] **Step 4: Run baseline, chunking, embedding, and reranker arms offline.** K=5 distinct sources, candidate pool K=20; local BGE-M3 and BGE-reranker-v2-M3 assets are pinned by the revisions in the aggregate report. Verify every artifact listed in the run sidecar by size and SHA-256.
+- [x] **Step 5: Record aggregate metrics and limits.** The result table and one-factor changes are in `docs/superpowers/reports/local-knowledge-eval-v2.md`; no per-query or source-derived content is tracked.
 
 ## Self-review
 
-- Coverage: the plan preserves v1, creates exactly 54 additions, builds hash-backed evidence, validates deterministic output, and stops for user review before evaluation.
+- Coverage: the plan preserves v1, creates exactly 54 additions, builds hash-backed evidence, validates deterministic output, waits for explicit approval, then freezes and evaluates the approved set.
 - TDD order: synthetic tests and observed failures precede implementation; local candidate generation only begins after the helper review passes.
-- Privacy: only generic code and synthetic tests are committed; all source-derived questions and evidence metadata remain in the ignored local fixture area.
-- Scope: no production retriever, model, corpus, scoring rule, frozen snapshot, or benchmark result is changed in this task.
+- Privacy: tracked changes include generic code, synthetic tests, and an aggregate-only result summary; source-derived questions, evidence, models, the frozen snapshot, and per-query artifacts remain in the ignored local fixture area.
+- Scope: no production retriever, model, or scoring rule is changed; the approved local snapshot and its four-arm benchmark are recorded as this plan's final task.

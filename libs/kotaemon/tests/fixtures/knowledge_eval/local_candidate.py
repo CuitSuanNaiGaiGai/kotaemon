@@ -15,7 +15,7 @@ import stat
 import sys
 import tempfile
 import unicodedata
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -148,6 +148,21 @@ def _digest(value: Any, label: str) -> str:
     return value
 
 
+def _safe_relative_path(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{label} must be a non-empty relative POSIX path")
+    if "\x00" in value or "\\" in value or value.startswith("/"):
+        raise ValueError(f"{label} must be a safe relative POSIX path")
+    path = PurePosixPath(value)
+    if path.is_absolute() or path.as_posix() != value:
+        raise ValueError(f"{label} must be a normalized relative POSIX path")
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError(f"{label} must not contain dot or parent components")
+    if re.match(r"^[A-Za-z]:", value):
+        raise ValueError(f"{label} must not be a drive-qualified path")
+    return value
+
+
 def _id_list(value: Any, label: str, *, allow_empty: bool = False) -> list[str]:
     if not isinstance(value, list) or not all(
         isinstance(item, str) and item.strip() for item in value
@@ -191,6 +206,9 @@ def _load_v1(v1_dir: Path) -> dict[str, Any]:
         raise ValueError("v1 manifest snapshot_version must be 'v1'")
     if manifest.get("review_status") != "approved":
         raise ValueError("v1 manifest must have review_status='approved'")
+    source_root = _safe_relative_path(
+        manifest.get("source_root"), "v1 manifest source_root"
+    )
     declared_hashes = manifest.get("payload_sha256")
     if not isinstance(declared_hashes, dict) or set(declared_hashes) != set(_V1_FILES):
         raise ValueError("v1 manifest must hash exactly records.json, judgments.jsonl, and anchors.jsonl")
@@ -345,6 +363,7 @@ def _load_v1(v1_dir: Path) -> dict[str, Any]:
         "v1_anchors": anchors,
         "query_by_id": query_by_id,
         "prompt_keys": prompt_keys,
+        "source_root": source_root,
         "manifest_sha256": _sha256(raw_files["manifest.json"]),
     }
 
@@ -523,6 +542,7 @@ def _prepare_candidate(
         "snapshot_version": "v2-draft",
         "review_status": "draft",
         "review_date": None,
+        "source_root": parent["source_root"],
         "parent_manifest_sha256": parent["manifest_sha256"],
         "counts": counts,
         "payload_sha256": {name: _sha256(payloads[name]) for name in _PAYLOAD_FILES},

@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from kotaemon.indices.knowledge.evaluation import local_cli
 from kotaemon.indices.knowledge.evaluation import local_ingest
+from kotaemon.indices.knowledge.evaluation import local_snapshot
 from kotaemon.indices.knowledge.evaluation.local_models import LocalModelPaths
 
 
@@ -873,6 +874,77 @@ def test_freeze_persists_approver_and_date_in_manifest_bound_sidecar(tmp_path):
         "approved_at": "2026-10-04",
         "snapshot_manifest_sha256": hashlib.sha256(snapshot_manifest).hexdigest(),
     }
+
+
+def test_freeze_converts_v2_draft_to_strict_snapshot_manifest(tmp_path):
+    local_root = tmp_path / "local"
+    draft = _write_complete_synthetic_draft(local_root)
+    candidate = local_root / "draft" / "v2" / "candidate"
+    candidate.parent.mkdir(parents=True)
+    draft.rename(candidate)
+
+    draft_manifest_path = candidate / "manifest.json"
+    draft_manifest = json.loads(draft_manifest_path.read_bytes())
+    draft_manifest["snapshot_version"] = "v2-draft"
+    del draft_manifest["schema_version"]
+    draft_manifest["parent_manifest_sha256"] = hashlib.sha256(
+        b"synthetic parent manifest"
+    ).hexdigest()
+    draft_manifest_path.write_bytes(_json_bytes(draft_manifest))
+
+    result = CliRunner().invoke(
+        local_cli.main,
+        [
+            "freeze",
+            "--draft-dir",
+            str(candidate),
+            "--local-root",
+            str(local_root),
+            "--version",
+            "v2",
+            "--approved-by",
+            "reviewer@example.invalid",
+            "--approved-at",
+            "2026-10-04",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    frozen = local_root / "snapshots" / "v2"
+    local_snapshot.load_local_snapshot(frozen)
+    manifest_bytes = (frozen / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    records = json.loads((frozen / "records.json").read_bytes())
+    source = records["sources"][0]
+    assert set(manifest) == local_snapshot._MANIFEST_FIELDS
+    assert manifest["schema_version"] == 1
+    assert manifest["snapshot_version"] == "v2"
+    assert "parent_manifest_sha256" not in manifest
+    assert manifest["source_root"] == "synthetic/sources"
+    assert manifest["source_provenance"] == [
+        {
+            "source_id": source["source_id"],
+            "repository_path": "synthetic/sources/notes.md",
+            "sha256": source["sha256"],
+        }
+    ]
+    assert manifest["counts"] == {
+        "source_paths": 1,
+        "documents": 1,
+        "source_units": 1,
+        "chunks": 1,
+        "queries": 1,
+        "anchors": 1,
+    }
+    assert manifest["payload_sha256"] == {
+        name: hashlib.sha256((frozen / name).read_bytes()).hexdigest()
+        for name in ("records.json", "judgments.jsonl", "anchors.jsonl")
+    }
+    approval = json.loads((frozen / "approval.json").read_bytes())
+    assert (
+        approval["snapshot_manifest_sha256"]
+        == hashlib.sha256(manifest_bytes).hexdigest()
+    )
 
 
 def test_freeze_requires_both_approval_fields(tmp_path):
