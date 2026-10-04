@@ -163,9 +163,11 @@ def _normalized_prompt(value: str) -> str:
 
 
 def _validate_topic_and_type(row: dict[str, Any], label: str) -> None:
-    if row.get("topic") not in _TOPICS:
+    topic = row.get("topic")
+    if not isinstance(topic, str) or topic not in _TOPICS:
         raise ValueError(f"{label} has an unsupported topic")
-    if row.get("query_type") not in _QUERY_TYPES:
+    query_type = row.get("query_type")
+    if not isinstance(query_type, str) or query_type not in _QUERY_TYPES:
         raise ValueError(f"{label} has an unsupported query_type")
 
 
@@ -182,6 +184,10 @@ def _load_v1(v1_dir: Path) -> dict[str, Any]:
 
     records = _require_object(_decode_json(raw_files["records.json"], "v1 records.json"), "v1 records.json")
     manifest = _require_object(_decode_json(raw_files["manifest.json"], "v1 manifest.json"), "v1 manifest.json")
+    if manifest.get("snapshot_version") != "v1":
+        raise ValueError("v1 manifest snapshot_version must be 'v1'")
+    if manifest.get("review_status") != "approved":
+        raise ValueError("v1 manifest must have review_status='approved'")
     declared_hashes = manifest.get("payload_sha256")
     if not isinstance(declared_hashes, dict) or set(declared_hashes) != set(_V1_FILES):
         raise ValueError("v1 manifest must hash exactly records.json, judgments.jsonl, and anchors.jsonl")
@@ -526,6 +532,16 @@ def _append_jsonl(prefix: bytes, rows: list[dict[str, Any]]) -> bytes:
     return prefix + separator + b"".join(_json_bytes(row) for row in rows)
 
 
+def _ensure_output_not_v1(v1_dir: Path, output_dir: Path) -> None:
+    try:
+        parent = v1_dir.resolve(strict=True)
+        output = output_dir.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise ValueError("could not resolve candidate output and v1 parent paths") from error
+    if output == parent:
+        raise ValueError("candidate output must not resolve to the v1 parent directory")
+
+
 def build_candidate(
     v1_dir: Path,
     additions_path: Path,
@@ -533,14 +549,16 @@ def build_candidate(
     output_dir: Path,
 ) -> dict[str, int]:
     """Build a deterministic v2 draft from a validated v1 snapshot and JSONL inputs."""
+    v1_path = Path(v1_dir)
+    output_path = Path(output_dir)
+    _ensure_output_not_v1(v1_path, output_path)
     payloads, manifest, counts, _, _ = _prepare_candidate(
-        Path(v1_dir), Path(additions_path), Path(legacy_metadata_path)
+        v1_path, Path(additions_path), Path(legacy_metadata_path)
     )
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():
-        (output / name).write_bytes(payload)
-    (output / "manifest.json").write_bytes(_manifest_bytes(manifest))
+        (output_path / name).write_bytes(payload)
+    (output_path / "manifest.json").write_bytes(_manifest_bytes(manifest))
     return counts
 
 
@@ -551,10 +569,13 @@ def validate_candidate(
     output_dir: Path,
 ) -> dict[str, int]:
     """Validate a candidate against its parent and source-free metadata inputs."""
+    v1_path = Path(v1_dir)
+    output_path = Path(output_dir)
+    _ensure_output_not_v1(v1_path, output_path)
     payloads, manifest, counts, v1_judgments, v1_anchors = _prepare_candidate(
-        Path(v1_dir), Path(additions_path), Path(legacy_metadata_path)
+        v1_path, Path(additions_path), Path(legacy_metadata_path)
     )
-    output = Path(output_dir)
+    output = output_path
     if output.is_symlink() or not output.is_dir():
         raise ValueError("candidate output must be a regular directory")
     names = {path.name for path in output.iterdir()}

@@ -454,6 +454,55 @@ def test_build_candidate_rejects_json_array_inputs(tmp_path):
         _build(case, tmp_path / "draft")
 
 
+@pytest.mark.parametrize("output_alias", ["same-directory", "symlink"])
+def test_build_candidate_rejects_v1_output_path_without_mutating_parent(
+    tmp_path, output_alias
+):
+    case = _make_case(tmp_path)
+    v1_dir = case["v1_dir"]
+    output_dir = v1_dir
+    if output_alias == "symlink":
+        output_dir = tmp_path / "v1-alias"
+        output_dir.symlink_to(v1_dir, target_is_directory=True)
+    before = {path.name: path.read_bytes() for path in v1_dir.iterdir() if path.is_file()}
+    error = None
+
+    try:
+        _build(case, output_dir)
+    except ValueError as caught:
+        error = caught
+
+    after = {path.name: path.read_bytes() for path in v1_dir.iterdir() if path.is_file()}
+    assert after == before, "attempted build changed the v1 parent"
+    assert error is not None, "build accepted an output path resolving to v1"
+    assert "output" in str(error).lower() or "parent" in str(error).lower()
+
+
+@pytest.mark.parametrize("field", ["topic", "query_type"])
+def test_build_candidate_rejects_nonstring_taxonomy_values(tmp_path, field):
+    case = _make_case(tmp_path)
+    additions = _read_jsonl(case["additions_path"])
+    additions[0][field] = []
+    _write_jsonl(case["additions_path"], additions)
+
+    with pytest.raises(ValueError, match=field):
+        _build(case, tmp_path / "draft")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("snapshot_version", "v2"), ("review_status", "draft")]
+)
+def test_build_candidate_rejects_unapproved_or_wrong_v1_parent(tmp_path, field, value):
+    case = _make_case(tmp_path)
+    manifest_path = case["v1_dir"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest[field] = value
+    manifest_path.write_bytes(_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="v1|approved|snapshot"):
+        _build(case, tmp_path / "draft")
+
+
 def test_validate_candidate_rejects_a_modified_v1_parent(tmp_path):
     case = _make_case(tmp_path)
     output_dir = tmp_path / "draft"
@@ -537,3 +586,33 @@ def test_cli_build_and_validate_print_counts_without_candidate_text(tmp_path):
     assert validate.returncode == 0
     assert json.loads(validate.stdout) == EXPECTED_COUNTS
     assert "Synthetic" not in validate.stdout
+
+
+def test_cli_rejects_nonstring_topic_without_traceback(tmp_path):
+    case = _make_case(tmp_path)
+    additions = _read_jsonl(case["additions_path"])
+    additions[0]["topic"] = []
+    _write_jsonl(case["additions_path"], additions)
+    script = Path(local_candidate.__file__)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "build",
+            "--v1",
+            str(case["v1_dir"]),
+            "--additions",
+            str(case["additions_path"]),
+            "--legacy-metadata",
+            str(case["legacy_metadata_path"]),
+            "--output",
+            str(tmp_path / "draft"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "topic" in result.stderr
