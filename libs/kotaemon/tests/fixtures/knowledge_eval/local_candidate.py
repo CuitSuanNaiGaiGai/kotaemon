@@ -9,8 +9,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -542,6 +545,48 @@ def _ensure_output_not_v1(v1_dir: Path, output_dir: Path) -> None:
         raise ValueError("candidate output must not resolve to the v1 parent directory")
 
 
+def _check_output_targets(output_dir: Path) -> None:
+    if output_dir.is_symlink():
+        raise ValueError("candidate output directory must not be a symlink")
+    if not output_dir.exists():
+        return
+    if not output_dir.is_dir():
+        raise ValueError("candidate output must be a regular directory")
+    for name in _OUTPUT_FILES:
+        target = output_dir / name
+        try:
+            mode = target.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"candidate output target {name} must not be a symlink")
+        if not stat.S_ISREG(mode):
+            raise ValueError(f"candidate output target {name} must be a regular file or absent")
+
+
+def _write_output_atomically(output_dir: Path, files: dict[str, bytes]) -> None:
+    temporary_paths: dict[str, Path] = {}
+    try:
+        for name, payload in files.items():
+            descriptor, raw_path = tempfile.mkstemp(prefix=f".{name}.", dir=output_dir)
+            temporary_path = Path(raw_path)
+            temporary_paths[name] = temporary_path
+            with os.fdopen(descriptor, "wb") as temporary_file:
+                temporary_file.write(payload)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+
+        _check_output_targets(output_dir)
+        for name in files:
+            os.replace(temporary_paths.pop(name), output_dir / name)
+    finally:
+        for temporary_path in temporary_paths.values():
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def build_candidate(
     v1_dir: Path,
     additions_path: Path,
@@ -552,13 +597,14 @@ def build_candidate(
     v1_path = Path(v1_dir)
     output_path = Path(output_dir)
     _ensure_output_not_v1(v1_path, output_path)
+    _check_output_targets(output_path)
     payloads, manifest, counts, _, _ = _prepare_candidate(
         v1_path, Path(additions_path), Path(legacy_metadata_path)
     )
     output_path.mkdir(parents=True, exist_ok=True)
-    for name, payload in payloads.items():
-        (output_path / name).write_bytes(payload)
-    (output_path / "manifest.json").write_bytes(_manifest_bytes(manifest))
+    _check_output_targets(output_path)
+    files = {**payloads, "manifest.json": _manifest_bytes(manifest)}
+    _write_output_atomically(output_path, files)
     return counts
 
 

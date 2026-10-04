@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -476,6 +477,63 @@ def test_build_candidate_rejects_v1_output_path_without_mutating_parent(
     assert after == before, "attempted build changed the v1 parent"
     assert error is not None, "build accepted an output path resolving to v1"
     assert "output" in str(error).lower() or "parent" in str(error).lower()
+
+
+@pytest.mark.parametrize(
+    "output_name",
+    [
+        "records.json",
+        "judgments.jsonl",
+        "anchors.jsonl",
+        "question_metadata.jsonl",
+        "manifest.json",
+    ],
+)
+def test_build_candidate_rejects_output_file_symlinks_before_any_write(
+    tmp_path, output_name
+):
+    case = _make_case(tmp_path)
+    output_dir = tmp_path / "draft"
+    output_dir.mkdir()
+    target_name = output_name if output_name in {
+        "records.json",
+        "judgments.jsonl",
+        "anchors.jsonl",
+        "manifest.json",
+    } else "judgments.jsonl"
+    output_link = output_dir / output_name
+    output_link.symlink_to(case["v1_dir"] / target_name)
+    before = {path.name: path.read_bytes() for path in case["v1_dir"].iterdir() if path.is_file()}
+    error = None
+
+    try:
+        _build(case, output_dir)
+    except ValueError as caught:
+        error = caught
+
+    after = {path.name: path.read_bytes() for path in case["v1_dir"].iterdir() if path.is_file()}
+    assert after == before, "attempted build changed the v1 parent through an output symlink"
+    assert error is not None, "build accepted a symlink output target"
+    assert "symlink" in str(error).lower()
+    assert {path.name for path in output_dir.iterdir()} == {output_name}
+
+
+def test_build_candidate_replaces_output_hardlink_without_changing_parent(tmp_path):
+    case = _make_case(tmp_path)
+    output_dir = tmp_path / "draft"
+    output_dir.mkdir()
+    v1_judgments = case["v1_dir"] / "judgments.jsonl"
+    output_judgments = output_dir / "judgments.jsonl"
+    os.link(v1_judgments, output_judgments)
+    before = {path.name: path.read_bytes() for path in case["v1_dir"].iterdir() if path.is_file()}
+
+    counts = _build(case, output_dir)
+
+    after = {path.name: path.read_bytes() for path in case["v1_dir"].iterdir() if path.is_file()}
+    assert after == before, "attempted build changed the v1 parent through an output hardlink"
+    assert counts == EXPECTED_COUNTS
+    assert output_judgments.read_bytes().startswith(before["judgments.jsonl"])
+    assert not os.path.samefile(v1_judgments, output_judgments)
 
 
 @pytest.mark.parametrize("field", ["topic", "query_type"])
