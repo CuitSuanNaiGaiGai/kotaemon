@@ -18,7 +18,7 @@ from kotaemon.base import Document, DocumentWithEmbedding
 from kotaemon.embeddings import BaseEmbeddings
 from kotaemon.indices import VectorIndexing, VectorRetrieval
 from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
-from kotaemon.indices.knowledge.evaluation.local_models import (
+from kotaemon.models.local_bge import (
     EMBEDDING_MODEL_ID,
     RERANKER_MODEL_ID,
     BgeM3Embeddings,

@@ -11,6 +11,10 @@ from kotaemon.indices.knowledge.planning.query_planner import (
     KnowledgeSource,
     normalize_logical_path,
 )
+from kotaemon.indices.knowledge.retrieval.contracts import (
+    EnrichedQuery,
+    RetrievalPolicy,
+)
 from kotaemon.indices.knowledge.schema import SUPPORTED_SOURCE_TYPES
 
 from .trace import trace_event
@@ -54,6 +58,8 @@ class KnowledgeService:
         top_k: int = 10,
         allowed_source_ids: Sequence[str] | None = None,
         trace: Any | None = None,
+        enriched_query: EnrichedQuery | None = None,
+        retrieval_policy: RetrievalPolicy | None = None,
     ) -> list[RetrievedDocument]:
         """Search within visible sources and preserve their mandatory constraints."""
         trace_event(trace, "request", original_query=query)
@@ -199,6 +205,10 @@ class KnowledgeService:
             scope=planned_chunks,
             fallback_scope=mandatory_chunks,
         )
+        if enriched_query is not None:
+            retrieval_kwargs["enriched_query"] = enriched_query
+        if retrieval_policy is not None:
+            retrieval_kwargs["retrieval_policy"] = retrieval_policy
         if trace is not None:
             retrieval_kwargs["trace"] = trace
         documents = self.retriever(**retrieval_kwargs)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, Sequence, cast
 
@@ -21,6 +23,8 @@ from kotaemon.storages import BaseDocumentStore, BaseVectorStore
 
 from .base import BaseIndexing, BaseRetrieval
 from .knowledge.retrieval.diversity import select_diverse_documents
+from .knowledge.retrieval.contracts import EnrichedQuery, RecallBatch, RetrievalPolicy
+from .knowledge.retrieval.fusion import fuse_batches
 from .knowledge.retrieval.trace import trace_event, trace_update
 from .rankings import BaseReranking, LLMReranking
 
@@ -321,18 +325,30 @@ class VectorRetrieval(BaseRetrieval):
                     and score_availability.get(doc_id, False)
                 )
             elif branch == "reranker":
-                # The legacy lexical branch stores -1.0 as a missing-score
-                # sentinel. Other reranker output scores are real at this point.
-                try:
-                    document_score = getattr(document, "score", None)
-                    available = (
-                        document_score is not None and float(document_score) != -1.0
-                    )
-                except (TypeError, ValueError):
-                    available = False
+                rerank_score = (getattr(document, "retrieval_metadata", {}) or {}).get(
+                    "rerank_score"
+                )
+                if rerank_score is not None:
+                    try:
+                        available = math.isfinite(float(rerank_score))
+                    except (TypeError, ValueError):
+                        available = False
+                    score = rerank_score if available else None
+                else:
+                    # The legacy lexical branch stores -1.0 as a missing-score
+                    # sentinel. Other reranker output scores are real at this point.
+                    try:
+                        document_score = getattr(document, "score", None)
+                        available = (
+                            document_score is not None and float(document_score) != -1.0
+                        )
+                    except (TypeError, ValueError):
+                        available = False
+                    score = getattr(document, "score", None) if available else None
             else:
                 available = False
-            score = getattr(document, "score", None) if available else None
+            if branch != "reranker":
+                score = getattr(document, "score", None) if available else None
             candidates.append(
                 {
                     "id": doc_id,
@@ -386,6 +402,285 @@ class VectorRetrieval(BaseRetrieval):
             if doc_id in docs_by_id
         ]
 
+    def _policy_routes(
+        self,
+        *,
+        routes: list[str],
+        policy: RetrievalPolicy,
+        candidate_k: int,
+        scope: list[str] | None,
+        fallback_scope: list[str] | None,
+        metadata_filter: Callable[[Mapping[str, Any]], bool] | None,
+        query_kwargs: dict[str, Any],
+        trace: Any | None,
+    ):
+        """Run bounded dense/lexical routes and fuse only authorized records."""
+        if self.doc_store is None:
+            raise ValueError(
+                "doc_store is not provided. Please provide a doc_store to "
+                "retrieve the documents"
+            )
+
+        policy_for_fusion = replace(policy, candidate_k=candidate_k)
+        lexical_available = self._lexical_available(self.doc_store)
+        dense_enabled = self.retrieval_mode in {"vector", "hybrid"}
+        lexical_enabled = self.retrieval_mode in {"text", "hybrid"}
+        if not dense_enabled and not lexical_enabled:
+            raise ValueError(f"Unknown retrieval mode: {self.retrieval_mode}")
+
+        def collect(query_scope):
+            batches: list[RecallBatch] = []
+            errors: dict[str, Exception] = {}
+            dense_documents: list[RetrievedDocument] = []
+            lexical_documents: list[RetrievedDocument] = []
+            for query_index, route_query in enumerate(routes):
+                if dense_enabled:
+                    score_availability: dict[str, bool] = {}
+                    documents: list[RetrievedDocument] = []
+                    try:
+                        query_embedding = self.embedding(route_query)[0].embedding
+                        documents = self._vector_candidates(
+                            query_embedding,
+                            candidate_k,
+                            query_scope,
+                            query_kwargs,
+                            score_availability=score_availability,
+                        )
+                        documents = self._filter_to_scope(documents, query_scope)
+                        documents = self._filter_to_metadata(documents, metadata_filter)
+                        status = "available" if documents else "empty"
+                    except Exception as exc:
+                        errors.setdefault("dense", exc)
+                        status = "error"
+                    dense_documents.extend(documents)
+                    batches.append(
+                        RecallBatch(
+                            branch="dense",
+                            query_index=query_index,
+                            query=route_query,
+                            documents=tuple(documents),
+                            status=status,
+                            error_type=(
+                                type(errors["dense"]).__name__
+                                if status == "error"
+                                else None
+                            ),
+                        )
+                    )
+                    self._trace_event(
+                        trace,
+                        "recall_route",
+                        branch="dense",
+                        query_index=query_index,
+                        status=status,
+                        scope_ids=query_scope,
+                        requested_candidate_depth=candidate_k,
+                        observed_candidate_depth=len(documents),
+                        candidates=self._candidate_trace_records(
+                            documents,
+                            branch="vector",
+                            score_availability=score_availability,
+                        ),
+                        error_type=(
+                            type(errors["dense"]).__name__
+                            if status == "error"
+                            else None
+                        ),
+                    )
+
+                if lexical_enabled:
+                    if not lexical_available:
+                        batches.append(
+                            RecallBatch(
+                                branch="lexical",
+                                query_index=query_index,
+                                query=route_query,
+                                documents=(),
+                                status="unavailable",
+                            )
+                        )
+                        status = "unavailable"
+                        documents = []
+                    else:
+                        documents = []
+                        try:
+                            lexical_results = self.doc_store.query(
+                                route_query,
+                                top_k=candidate_k,
+                                doc_ids=query_scope,
+                            )
+                            documents = [
+                                RetrievedDocument(**document.to_dict(), score=-1.0)
+                                for document in lexical_results
+                            ]
+                            documents = self._filter_to_scope(documents, query_scope)
+                            documents = self._filter_to_metadata(
+                                documents, metadata_filter
+                            )
+                            documents = self._deduplicate_docs(documents)
+                            status = "available" if documents else "empty"
+                        except Exception as exc:
+                            errors.setdefault("lexical", exc)
+                            status = "error"
+                        batches.append(
+                            RecallBatch(
+                                branch="lexical",
+                                query_index=query_index,
+                                query=route_query,
+                                documents=tuple(documents),
+                                status=status,
+                                error_type=(
+                                    type(errors["lexical"]).__name__
+                                    if status == "error"
+                                    else None
+                                ),
+                            )
+                        )
+                    lexical_documents.extend(documents)
+                    self._trace_event(
+                        trace,
+                        "recall_route",
+                        branch="lexical",
+                        query_index=query_index,
+                        status=status,
+                        scope_ids=query_scope,
+                        requested_candidate_depth=candidate_k,
+                        observed_candidate_depth=len(documents),
+                        candidates=self._candidate_trace_records(
+                            documents, branch="lexical"
+                        ),
+                        score_available=False,
+                        error_type=(
+                            type(errors["lexical"]).__name__
+                            if status == "error"
+                            else None
+                        ),
+                    )
+            fused = fuse_batches(batches, policy_for_fusion)
+            fused = self._deduplicate_docs(self._filter_to_scope(fused, query_scope))
+            fused = self._filter_to_metadata(fused, metadata_filter)
+            self._trace_event(
+                trace,
+                "fusion",
+                ids=[document.doc_id for document in fused],
+                scores=[
+                    (document.retrieval_metadata or {}).get("fusion_score")
+                    for document in fused
+                ],
+                candidate_depth=candidate_k,
+                max_fused_candidates=policy.max_fused_candidates,
+            )
+            return fused, batches, errors, dense_documents, lexical_documents
+
+        result, batches, errors, dense_docs, lexical_docs = collect(scope)
+        fallback_used = False
+        if (
+            not result
+            and not errors
+            and scope is not None
+            and (fallback_scope is None or bool(fallback_scope))
+            and set(scope) != set(fallback_scope or ())
+        ):
+            fallback_used = True
+            self._trace_event(
+                trace,
+                "scope_fallback",
+                reason="zero_scoped_hits",
+                fallback_scope_ids=fallback_scope,
+            )
+            result, batches, errors, dense_docs, lexical_docs = collect(fallback_scope)
+            scope = fallback_scope
+
+        had_successful_route = any(
+            batch.status in {"available", "empty"} for batch in batches
+        )
+        if errors:
+            self._trace_update(
+                trace,
+                branch_errors={
+                    branch: f"{type(error).__name__}: {error}"
+                    for branch, error in errors.items()
+                },
+            )
+        if errors and not had_successful_route:
+            details = "; ".join(
+                f"{branch}: {type(error).__name__}: {error}"
+                for branch, error in errors.items()
+            )
+            raise RuntimeError(f"retrieval branches failed: {details}") from next(
+                iter(errors.values())
+            )
+
+        lexical_statuses = [
+            batch.status for batch in batches if batch.branch == "lexical"
+        ]
+        if not lexical_enabled:
+            lexical_status = "not_used"
+        elif lexical_statuses and all(
+            status == "unavailable" for status in lexical_statuses
+        ):
+            lexical_status = "unavailable"
+        elif "error" in lexical_statuses:
+            lexical_status = "error"
+        elif any(status == "available" for status in lexical_statuses):
+            lexical_status = "available"
+        else:
+            lexical_status = "empty"
+
+        dense_statuses = [batch.status for batch in batches if batch.branch == "dense"]
+        if not dense_enabled:
+            dense_status = "not_used"
+        elif "error" in dense_statuses:
+            dense_status = "error"
+        elif any(status == "available" for status in dense_statuses):
+            dense_status = "available"
+        else:
+            dense_status = "empty"
+
+        self._trace_update(
+            trace,
+            scope_status=(
+                "fallback"
+                if fallback_used
+                else ("scoped" if scope is not None else "global")
+            ),
+            scope_ids=scope,
+            candidate_k=candidate_k,
+            lexical_status=lexical_status,
+            lexical_result_count=len(lexical_docs),
+            scope_fallback=fallback_used,
+            scope_fallback_reason="zero_scoped_hits" if fallback_used else None,
+            route_statuses=[
+                {
+                    "branch": batch.branch,
+                    "query_index": batch.query_index,
+                    "status": batch.status,
+                    "error_type": batch.error_type,
+                }
+                for batch in batches
+            ],
+        )
+        if trace is not None:
+            self._trace_event(
+                trace,
+                "merged",
+                ids=[document.doc_id for document in result],
+                dense_status=dense_status,
+                lexical_status=lexical_status,
+                fusion_order=[document.doc_id for document in result],
+            )
+        return (
+            result,
+            lexical_status,
+            errors,
+            len(lexical_docs),
+            dense_docs,
+            lexical_docs,
+            dense_status,
+            had_successful_route,
+            fallback_used,
+        )
+
     def run(
         self,
         text: str | Document,
@@ -393,6 +688,9 @@ class VectorRetrieval(BaseRetrieval):
         scope: Sequence[str] | None = None,
         fallback_scope: Sequence[str] | None = None,
         trace: Any | None = None,
+        enriched_query: EnrichedQuery | None = None,
+        retrieval_policy: RetrievalPolicy | None = None,
+        candidate_k: int | None = None,
         **kwargs,
     ) -> list[RetrievedDocument]:
         """Retrieve a list of documents from vector store
@@ -406,6 +704,20 @@ class VectorRetrieval(BaseRetrieval):
         """
         if top_k is None:
             top_k = self.top_k
+        if candidate_k is not None and (
+            isinstance(candidate_k, bool)
+            or not isinstance(candidate_k, int)
+            or candidate_k < 1
+        ):
+            raise ValueError("candidate_k must be a positive integer")
+        explicit_candidate_k = candidate_k
+        if retrieval_policy is not None and not isinstance(
+            retrieval_policy, RetrievalPolicy
+        ):
+            raise TypeError("retrieval_policy must be a RetrievalPolicy")
+        if enriched_query is not None and not isinstance(enriched_query, EnrichedQuery):
+            raise TypeError("enriched_query must be an EnrichedQuery")
+        policy_enabled = bool(retrieval_policy and retrieval_policy.enabled)
 
         do_extend = kwargs.pop("do_extend", False)
         thumbnail_count = kwargs.pop("thumbnail_count", 3)
@@ -451,9 +763,10 @@ class VectorRetrieval(BaseRetrieval):
 
         # Scoped calls need spare candidates so post-filtering remains effective
         # when a backend ignores IDs or metadata filters.
-        candidate_k = top_k_first_round
+        candidate_k = explicit_candidate_k or top_k_first_round
         if requested_scope is not None:
-            candidate_k = max(candidate_k, top_k * self.first_round_top_k_mult)
+            if explicit_candidate_k is None:
+                candidate_k = max(candidate_k, top_k * self.first_round_top_k_mult)
 
         if self.doc_store is None:
             raise ValueError(
@@ -463,11 +776,42 @@ class VectorRetrieval(BaseRetrieval):
 
         query = text.text if isinstance(text, Document) else text
         self._trace_event(trace, "retrieval_query", semantic_query=query)
+        if policy_enabled:
+            variants = (
+                list(enriched_query.variants) if enriched_query is not None else [query]
+            )
+            normalized_routes: list[str] = []
+            seen_routes: set[str] = set()
+            for route_query in variants:
+                normalized = " ".join(route_query.casefold().split())
+                if normalized in seen_routes:
+                    continue
+                seen_routes.add(normalized)
+                normalized_routes.append(route_query)
+                if len(normalized_routes) >= retrieval_policy.max_variants:
+                    break
+            if not normalized_routes:
+                normalized_routes = [query]
+            if enriched_query is not None:
+                rerank_query = enriched_query.standalone_query
+            else:
+                rerank_query = query
+            policy_candidate_k = (
+                explicit_candidate_k
+                if explicit_candidate_k is not None
+                else retrieval_policy.candidate_k
+            )
+        else:
+            normalized_routes = []
+            rerank_query = query
+            policy_candidate_k = candidate_k
         lexical_available = self._lexical_available(self.doc_store)
         lexical_status = "not_used"
         branch_errors: dict[str, Exception] = {}
+        policy_route_succeeded = False
+        policy_fallback_used = False
         query_embedding = None
-        if self.retrieval_mode in {"vector", "hybrid"}:
+        if self.retrieval_mode in {"vector", "hybrid"} and not policy_enabled:
             try:
                 query_embedding = self.embedding(text)[0].embedding
             except Exception as exc:
@@ -529,6 +873,40 @@ class VectorRetrieval(BaseRetrieval):
             list[RetrievedDocument],
             str,
         ]:
+            nonlocal policy_route_succeeded, policy_fallback_used, requested_scope
+            if policy_enabled:
+                (
+                    policy_result,
+                    policy_lexical_status,
+                    policy_errors,
+                    policy_lexical_count,
+                    policy_dense_docs,
+                    policy_lexical_docs,
+                    policy_dense_status,
+                    policy_route_succeeded,
+                    policy_fallback_used,
+                ) = self._policy_routes(
+                    routes=normalized_routes,
+                    policy=retrieval_policy,
+                    candidate_k=policy_candidate_k,
+                    scope=query_scope,
+                    fallback_scope=visible_scope,
+                    metadata_filter=metadata_filter,
+                    query_kwargs=kwargs,
+                    trace=trace,
+                )
+                if policy_fallback_used:
+                    requested_scope = visible_scope
+                return (
+                    policy_result,
+                    policy_lexical_status,
+                    policy_errors,
+                    policy_lexical_count,
+                    policy_dense_docs,
+                    policy_lexical_docs,
+                    policy_dense_status,
+                )
+
             errors: dict[str, Exception] = {}
             vector_docs: list[RetrievedDocument] = []
             lexical_docs: list[RetrievedDocument] = []
@@ -717,7 +1095,8 @@ class VectorRetrieval(BaseRetrieval):
         # this point.
         fallback_ids = visible_scope
         should_retry = (
-            scope is not None
+            not policy_enabled
+            and scope is not None
             and not result
             and not branch_errors
             and (fallback_ids is None or bool(fallback_ids))
@@ -725,12 +1104,16 @@ class VectorRetrieval(BaseRetrieval):
         )
         self._trace_update(
             trace,
-            scope_status="scoped" if requested_scope is not None else "global",
+            scope_status=(
+                "fallback"
+                if policy_enabled and policy_fallback_used
+                else ("scoped" if requested_scope is not None else "global")
+            ),
             scope_ids=requested_scope,
-            candidate_k=candidate_k,
+            candidate_k=policy_candidate_k if policy_enabled else candidate_k,
             lexical_status=lexical_status,
             lexical_result_count=lexical_result_count,
-            scope_fallback=False,
+            scope_fallback=policy_fallback_used if policy_enabled else False,
         )
         if should_retry:
             self._trace_update(
@@ -778,7 +1161,7 @@ class VectorRetrieval(BaseRetrieval):
                     for branch, error in branch_errors.items()
                 },
             )
-            if not result:
+            if not result and not (policy_enabled and policy_route_succeeded):
                 if self.retrieval_mode == "hybrid":
                     details = "; ".join(
                         f"{branch}: {message}"
@@ -799,25 +1182,48 @@ class VectorRetrieval(BaseRetrieval):
 
         # use additional reranker to re-order the document list
         if self.rerankers and text:
+            policy_candidate_ids = {document.doc_id for document in result}
             for reranker in self.rerankers:
                 # if reranker is LLMReranking, limit the document with top_k items only
                 if isinstance(reranker, LLMReranking):
                     result = self._filter_docs(result, top_k=top_k)
-                result = reranker.run(documents=result, query=text)
+                result = reranker.run(
+                    documents=result,
+                    query=(rerank_query if policy_enabled else text),
+                )
                 result = self._deduplicate_docs(
                     self._filter_to_scope(result, requested_scope)
                 )
                 result = self._filter_to_metadata(result, metadata_filter)
+                if policy_enabled:
+                    result = [
+                        document
+                        for document in result
+                        if document.doc_id in policy_candidate_ids
+                    ]
                 reranker_name = getattr(
                     reranker,
                     "name",
                     type(reranker).__name__,
                 )
                 if trace is not None:
+                    model_metadata = getattr(reranker, "metadata", None)
+                    model_provenance = {
+                        key: getattr(model_metadata, key)
+                        for key in (
+                            "model_id",
+                            "revision",
+                            "query_max_length",
+                            "passage_max_length",
+                            "device",
+                        )
+                        if getattr(model_metadata, key, None) is not None
+                    }
                     self._trace_event(
                         trace,
                         "reranker",
                         name=str(reranker_name),
+                        model_provenance=model_provenance,
                         candidates=self._candidate_trace_records(
                             result,
                             branch="reranker",
