@@ -11,6 +11,12 @@ from typing import Any
 
 import gradio as gr
 from ktem.local_qa_core import LocalQA, open_playground
+from ktem.local_qa_conversation import (
+    DEFAULT_HISTORY_TOKEN_LIMIT,
+    DEFAULT_MAX_TURNS,
+    ConversationState,
+    OllamaQueryRewriter,
+)
 from ktem.local_qa_ollama import OllamaLocalClient
 
 _STREAM_UPDATE_INTERVAL = 0.1
@@ -20,13 +26,20 @@ def answer_question(
     qa: LocalQA,
     generator: OllamaLocalClient,
     question: str,
+    *,
+    user_history: Sequence[str] = (),
+    query_rewriter=None,
 ) -> tuple[str, Any]:
     clean_question = question.strip()
     if not clean_question:
         return "Enter a question.", []
 
     cards, evidence, status = _retrieve_generation_evidence(
-        qa, generator, clean_question
+        qa,
+        generator,
+        clean_question,
+        user_history=user_history,
+        query_rewriter=query_rewriter,
     )
     if status == "insufficient_evidence":
         return "No seed evidence fits within the configured context budget.", evidence
@@ -34,7 +47,12 @@ def answer_question(
         return "No evidence was retrieved from the frozen snapshot.", []
 
     try:
-        answer = generator.generate(clean_question, cards)
+        if user_history:
+            answer = generator.generate(
+                clean_question, cards, user_history=user_history
+            )
+        else:
+            answer = generator.generate(clean_question, cards)
     except (OSError, ValueError, urllib.error.URLError):
         answer = (
             "Local answer generation failed. Start Ollama and run "
@@ -47,6 +65,9 @@ def stream_answer_question(
     qa: LocalQA,
     generator: OllamaLocalClient,
     question: str,
+    *,
+    user_history: Sequence[str] = (),
+    query_rewriter=None,
 ) -> Iterator[tuple[str, Any]]:
     clean_question = question.strip()
     if not clean_question:
@@ -54,7 +75,11 @@ def stream_answer_question(
         return
 
     cards, evidence, status = _retrieve_generation_evidence(
-        qa, generator, clean_question
+        qa,
+        generator,
+        clean_question,
+        user_history=user_history,
+        query_rewriter=query_rewriter,
     )
     if status == "insufficient_evidence":
         yield "No seed evidence fits within the configured context budget.", evidence
@@ -68,7 +93,13 @@ def stream_answer_question(
     last_emitted_answer = ""
     last_update = monotonic()
     try:
-        for chunk in generator.generate_stream(clean_question, cards):
+        if user_history:
+            stream = generator.generate_stream(
+                clean_question, cards, user_history=user_history
+            )
+        else:
+            stream = generator.generate_stream(clean_question, cards)
+        for chunk in stream:
             answer += chunk
             now = monotonic()
             if (
@@ -90,16 +121,66 @@ def stream_answer_question(
         yield answer, gr.skip()
 
 
-def _retrieve_generation_evidence(qa, generator, question):
+def stream_session_answer(
+    qa,
+    generator,
+    question: str,
+    conversation_state: ConversationState | None = None,
+    resolve_followups: bool = False,
+) -> Iterator[tuple[str, Any, ConversationState]]:
+    """Retrieve using old session history, then retain this user turn once."""
+    state = (
+        conversation_state
+        if isinstance(conversation_state, ConversationState)
+        else ConversationState()
+    )
+    clean_question = question.strip() if isinstance(question, str) else ""
+    if not clean_question:
+        for answer, evidence in stream_answer_question(qa, generator, ""):
+            yield answer, evidence, state
+        return
+
+    count_tokens = getattr(generator, "count_tokens", None)
+    if not callable(count_tokens):
+        count_tokens = lambda text: len(text.encode("utf-8"))
+    updated_state = state.append_user(
+        clean_question,
+        max_turns=DEFAULT_MAX_TURNS,
+        token_limit=DEFAULT_HISTORY_TOKEN_LIMIT,
+        count_tokens=count_tokens,
+    )
+    query_rewriter = OllamaQueryRewriter(generator) if resolve_followups else None
+    for answer, evidence in stream_answer_question(
+        qa,
+        generator,
+        clean_question,
+        user_history=state.user_turns,
+        query_rewriter=query_rewriter,
+    ):
+        yield answer, evidence, updated_state
+
+
+def _retrieve_generation_evidence(
+    qa,
+    generator,
+    question,
+    *,
+    user_history: Sequence[str] = (),
+    query_rewriter=None,
+):
     retrieve_result = getattr(qa, "retrieve_result", None)
     if callable(retrieve_result):
         options = {}
         generation_budget = getattr(generator, "generation_budget", None)
         count_tokens = getattr(generator, "count_tokens", None)
         base_prompt = getattr(generator, "base_prompt", None)
+        options["user_history"] = tuple(user_history)
+        if callable(count_tokens):
+            options["count_tokens"] = count_tokens
+        if query_rewriter is not None:
+            options["query_rewriter"] = query_rewriter
         if generation_budget is not None:
             options["generation_budget"] = generation_budget
-            options["count_tokens"] = count_tokens
             options["base_prompt"] = (
                 base_prompt(question) if callable(base_prompt) else ""
             )
@@ -155,6 +236,12 @@ def clear_outputs() -> tuple[str, str, list[dict[str, Any]]]:
     return "", "", []
 
 
+def clear_session_outputs(
+    _conversation_state: ConversationState | None = None,
+) -> tuple[str, str, list[dict[str, Any]], ConversationState]:
+    return "", "", [], ConversationState()
+
+
 def build_ui(
     qa: LocalQA,
     generator: OllamaLocalClient,
@@ -173,12 +260,26 @@ def build_ui(
         f"Answer generation uses the configured local model `{generator.model}`."
     )
 
-    def ask_question(question_text: str):
-        yield from stream_answer_question(qa, generator, question_text)
+    def ask_question(
+        question_text: str,
+        conversation_state: ConversationState,
+        resolve_followups: bool,
+    ):
+        yield from stream_session_answer(
+            qa,
+            generator,
+            question_text,
+            conversation_state,
+            resolve_followups,
+        )
 
     with gr.Blocks(title="Local Snapshot QA", analytics_enabled=False) as demo:
         gr.Markdown(description)
         question = gr.Textbox(label="Question", lines=3)
+        conversation_state = gr.State(value=ConversationState())
+        resolve_followups = gr.Checkbox(
+            label="Resolve follow-ups with recent user turns", value=False
+        )
         with gr.Row():
             ask = gr.Button("Ask", variant="primary")
             clear = gr.Button("Clear")
@@ -186,13 +287,13 @@ def build_ui(
         evidence = gr.JSON(label="Retrieved evidence")
         ask_event = ask.click(
             fn=ask_question,
-            inputs=[question],
-            outputs=[answer, evidence],
+            inputs=[question, conversation_state, resolve_followups],
+            outputs=[answer, evidence, conversation_state],
         )
         clear.click(
-            fn=clear_outputs,
+            fn=clear_session_outputs,
             inputs=[],
-            outputs=[question, answer, evidence],
+            outputs=[question, answer, evidence, conversation_state],
             cancels=[ask_event],
         )
     return demo

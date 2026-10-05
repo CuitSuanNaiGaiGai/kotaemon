@@ -42,6 +42,11 @@ from kotaemon.indices.qa.format_context import (
 from kotaemon.indices.qa.utils import replace_think_tag_with_details
 from kotaemon.llms import ChatLLM
 
+from ..local_qa_conversation import (
+    DEFAULT_HISTORY_TOKEN_LIMIT,
+    DEFAULT_MAX_TURNS,
+    user_turns_from_history,
+)
 from ..utils import SUPPORTED_LANGUAGE_MAP
 from .base import BaseReasoning
 
@@ -158,6 +163,21 @@ class FullQAPipeline(BaseReasoning):
                 **query_context,
             )
             retriever_kwargs = {"text": query}
+            if getattr(retriever, "v3_enabled", False) and getattr(
+                retriever, "query_enrichment", False
+            ):
+                counter_factory = getattr(self.evidence_pipeline, "_counter", None)
+                count_tokens = (
+                    counter_factory()
+                    if callable(counter_factory)
+                    else lambda text: len(text.encode("utf-8"))
+                )
+                retriever_kwargs["user_history"] = user_turns_from_history(
+                    history,
+                    max_turns=DEFAULT_MAX_TURNS,
+                    token_limit=DEFAULT_HISTORY_TOKEN_LIMIT,
+                    count_tokens=count_tokens,
+                )
             if trace is not None:
                 retriever_kwargs["trace"] = retriever_trace
             retriever_docs = retriever_node(**retriever_kwargs)

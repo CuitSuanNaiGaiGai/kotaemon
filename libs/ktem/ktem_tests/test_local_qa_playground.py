@@ -13,8 +13,10 @@ from ktem.local_qa_playground import (
     answer_question,
     build_ui,
     clear_outputs,
+    clear_session_outputs,
     main,
 )
+from ktem.local_qa_conversation import ConversationState
 
 
 class FakeQA:
@@ -290,15 +292,25 @@ def test_ui_wires_ask_and_clear_and_disables_analytics():
     assert "20 vector candidates" in description
     assert "top five distinct sources" in description
     assert "synthetic:tag" in description
-    assert not any(
-        component["type"] in {"chatbot", "state"} for component in config["components"]
-    )
+    assert not any(component["type"] == "chatbot" for component in config["components"])
 
     question_id = next(
         component_id
         for component_id, component in components.items()
         if component["type"] == "textbox"
         and component["props"].get("label") == "Question"
+    )
+    state_id = next(
+        component_id
+        for component_id, component in components.items()
+        if component["type"] == "state"
+    )
+    rewrite_id = next(
+        component_id
+        for component_id, component in components.items()
+        if component["type"] == "checkbox"
+        and component["props"].get("label")
+        == "Resolve follow-ups with recent user turns"
     )
     answer_id = next(
         component_id
@@ -335,8 +347,8 @@ def test_ui_wires_ask_and_clear_and_disables_analytics():
         if (clear_id, "click") in event["targets"] and event["types"]["cancel"]
     )
 
-    assert ask_event["inputs"] == [question_id]
-    assert ask_event["outputs"] == [answer_id, evidence_id]
+    assert ask_event["inputs"] == [question_id, state_id, rewrite_id]
+    assert ask_event["outputs"] == [answer_id, evidence_id, state_id]
     ask_fn = demo.fns[ask_event["id"]].fn
     expected_evidence = [
         {
@@ -348,17 +360,22 @@ def test_ui_wires_ask_and_clear_and_disables_analytics():
             "text": "synthetic UI evidence",
         }
     ]
-    assert list(ask_fn("Which evidence?")) == [
+    updates = list(ask_fn("Which evidence?", ConversationState(), False))
+    assert [update[:2] for update in updates] == [
         ("Generating locally…", expected_evidence),
         ("synthetic UI answer", gr.skip()),
     ]
+    assert all(update[2].user_turns == ("Which evidence?",) for update in updates)
     assert generator.stream_calls == [("Which evidence?", (evidence_card,))]
 
     assert clear_event["inputs"] == []
-    assert clear_event["outputs"] == [question_id, answer_id, evidence_id]
+    assert clear_event["outputs"] == [question_id, answer_id, evidence_id, state_id]
     assert cancel_event["cancels"] == [ask_event["id"]]
     clear_fn = demo.fns[clear_event["id"]].fn
-    assert clear_fn() == ("", "", [])
+    assert clear_fn() == ("", "", [], ConversationState())
+    assert clear_session_outputs(ConversationState(("private turn",)))[3] == (
+        ConversationState()
+    )
 
 
 def test_main_forwards_cli_arguments_and_uses_loopback_launch(monkeypatch):

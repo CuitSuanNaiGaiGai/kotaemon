@@ -48,6 +48,12 @@ from kotaemon.indices.knowledge.retrieval.expansion import (
 from kotaemon.indices.knowledge.retrieval.trace import RetrievalTrace
 from kotaemon.models.local_bge import BgeM3Embeddings, BgeM3Reranking
 
+from ktem.local_qa_conversation import (
+    DEFAULT_HISTORY_TOKEN_LIMIT,
+    DEFAULT_MAX_TURNS,
+    ConversationState,
+)
+
 
 @dataclass(frozen=True)
 class EvidenceCard:
@@ -72,7 +78,12 @@ class LocalQAResult:
     status: str
 
 
-def render_generation_context(question: str, cards: Sequence[EvidenceCard]) -> str:
+def render_generation_context(
+    question: str,
+    cards: Sequence[EvidenceCard],
+    *,
+    user_history: Sequence[str] = (),
+) -> str:
     """Render the exact user-message body sent to the local Ollama client."""
     evidence = []
     for card in cards:
@@ -88,11 +99,11 @@ def render_generation_context(question: str, cards: Sequence[EvidenceCard]) -> s
         if card.chunk_id is not None:
             item["chunk_id"] = card.chunk_id
         evidence.append(item)
+    payload = {"question": question, "evidence": evidence}
+    if user_history:
+        payload["user_history"] = list(user_history)
     return json.dumps(
-        {
-            "question": question,
-            "evidence": evidence,
-        },
+        payload,
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
@@ -158,6 +169,7 @@ class LocalQA:
         generation_budget: GenerationBudget | None = None,
         count_tokens: Callable[[str], int] | None = None,
         base_prompt: str = "",
+        query_rewriter: Callable[[str, tuple[str, ...]], str] | None = None,
     ) -> tuple[EvidenceCard, ...]:
         return self.retrieve_result(
             question,
@@ -165,6 +177,7 @@ class LocalQA:
             generation_budget=generation_budget,
             count_tokens=count_tokens,
             base_prompt=base_prompt,
+            query_rewriter=query_rewriter,
         ).cards
 
     def retrieve_result(
@@ -175,19 +188,35 @@ class LocalQA:
         generation_budget: GenerationBudget | None = None,
         count_tokens: Callable[[str], int] | None = None,
         base_prompt: str = "",
+        query_rewriter: Callable[[str, tuple[str, ...]], str] | None = None,
     ) -> LocalQAResult:
         if not isinstance(question, str) or not question.strip():
             raise ValueError("question must not be empty")
 
         clean_question = question.strip()
+        history_counter = count_tokens or (lambda text: len(text.encode("utf-8")))
+        bounded_history_state = ConversationState()
+        history_turns = (
+            (user_history,) if isinstance(user_history, str) else user_history
+        )
+        for turn in history_turns:
+            if isinstance(turn, str):
+                bounded_history_state = bounded_history_state.append_user(
+                    turn,
+                    max_turns=DEFAULT_MAX_TURNS,
+                    token_limit=DEFAULT_HISTORY_TOKEN_LIMIT,
+                    count_tokens=history_counter,
+                )
+        bounded_user_history = bounded_history_state.user_turns
         trace = RetrievalTrace()
         if self._runtime is None:
             candidates = self._service.search(clean_question, top_k=20)
             enriched_query = None
         else:
             enriched_query = QueryEnricher(
-                max_variants=self._retrieval_policy.max_variants
-            ).enrich(clean_question, user_history)
+                rewriter=query_rewriter,
+                max_variants=self._retrieval_policy.max_variants,
+            ).enrich(clean_question, bounded_user_history)
             candidates = self._service.search(
                 clean_question,
                 top_k=20,
@@ -274,6 +303,7 @@ class LocalQA:
                 render_context=lambda documents: render_generation_context(
                     clean_question,
                     [cards_by_id[document.doc_id] for document in documents],
+                    user_history=bounded_user_history,
                 ),
             )
             cards = tuple(
@@ -368,6 +398,8 @@ class LocalQA:
             ),
             "chunk_seed_k": 20,
             "distinct_source_k": 5,
+            "history_turns": len(bounded_user_history),
+            "history_tokens": history_counter("\n".join(bounded_user_history)),
         }
         return LocalQAResult(
             cards=cards,

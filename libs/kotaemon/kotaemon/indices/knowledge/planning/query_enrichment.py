@@ -18,6 +18,11 @@ _CODE_OR_VERSION = re.compile(
     r"(?<![\w])(?:[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)+|"
     r"[0-9]+(?:[-_.][A-Za-z0-9]+)+)(?![\w])"
 )
+_FOLLOW_UP_PREFIX = re.compile(
+    r"^\s*(?:and\b|also\b|what about\b|how about\b|"
+    r"what about that\b|which one\b|same for\b)",
+    re.IGNORECASE,
+)
 _TRAILING_PATH_PUNCTUATION = ".,;:!?)]}"
 
 
@@ -63,11 +68,31 @@ def _bounded_user_history(user_history: Sequence[str]) -> tuple[str, ...]:
     else:
         candidates = user_history
     turns = [
-        turn.strip()
-        for turn in candidates
-        if isinstance(turn, str) and turn.strip()
+        turn.strip() for turn in candidates if isinstance(turn, str) and turn.strip()
     ]
     return tuple(turns[-_HISTORY_TURNS:])
+
+
+def _is_clear_follow_up(query: str) -> bool:
+    if "..." in query or "…" in query:
+        return True
+    if _FOLLOW_UP_PREFIX.search(query):
+        return True
+    compact = " ".join(query.strip().casefold().split())
+    return compact.startswith(
+        (
+            "那",
+            "那呢",
+            "那么呢",
+            "然后呢",
+            "还有呢",
+            "这个呢",
+            "它呢",
+            "上述",
+            "前面提到的",
+            "同样呢",
+        )
+    )
 
 
 class QueryEnricher:
@@ -86,9 +111,7 @@ class QueryEnricher:
         self.rewriter = rewriter
         self.max_variants = max_variants
 
-    def enrich(
-        self, query: str, user_history: Sequence[str] = ()
-    ) -> EnrichedQuery:
+    def enrich(self, query: str, user_history: Sequence[str] = ()) -> EnrichedQuery:
         if not isinstance(query, str):
             raise TypeError("query must be a string")
 
@@ -97,9 +120,11 @@ class QueryEnricher:
         standalone_query = fallback_query
         reason = "original"
 
-        if self.rewriter is not None:
+        bounded_history = _bounded_user_history(user_history)
+        is_follow_up = _is_clear_follow_up(fallback_query)
+        if self.rewriter is not None and bounded_history and is_follow_up:
             try:
-                rewritten = self.rewriter(query, _bounded_user_history(user_history))
+                rewritten = self.rewriter(query, bounded_history)
             except Exception:
                 rewritten = None
                 reason = "rewriter_fallback"
@@ -115,7 +140,9 @@ class QueryEnricher:
                     and len(candidate) <= _MAX_REWRITE_CHARS
                     and not has_invalid_control
                 ):
-                    if _normalized_route(candidate) == _normalized_route(fallback_query):
+                    if _normalized_route(candidate) == _normalized_route(
+                        fallback_query
+                    ):
                         standalone_query = fallback_query
                         reason = "original"
                     else:
@@ -125,6 +152,8 @@ class QueryEnricher:
                     reason = "rewriter_fallback"
             elif reason != "rewriter_fallback":
                 reason = "rewriter_fallback"
+        elif self.rewriter is not None and bounded_history and not is_follow_up:
+            reason = "topic_switch"
 
         if self.max_variants == 1 and _normalized_route(
             standalone_query

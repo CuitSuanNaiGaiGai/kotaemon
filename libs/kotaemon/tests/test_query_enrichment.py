@@ -28,12 +28,12 @@ def test_enrichment_retains_original_and_exact_code_path_and_version():
 @pytest.mark.parametrize("rewritten", ["   ", None, 42])
 def test_invalid_rewriter_output_falls_back_to_original(rewritten):
     enriched = QueryEnricher(rewriter=lambda _query, _history: rewritten).enrich(
-        "current question"
+        "And what about Linux?", user_history=("VPN reset policy?",)
     )
 
-    assert enriched.standalone_query == "current question"
-    assert enriched.variants[0] == "current question"
-    assert "current question" in enriched.variants
+    assert enriched.standalone_query == "And what about Linux?"
+    assert enriched.variants[0] == "And what about Linux?"
+    assert "And what about Linux?" in enriched.variants
 
 
 def test_rewriter_exception_falls_back_to_original():
@@ -41,11 +41,11 @@ def test_rewriter_exception_falls_back_to_original():
         raise RuntimeError("rewrite failed")
 
     enriched = QueryEnricher(rewriter=broken_rewriter).enrich(
-        "current question", user_history=("recent user turn",)
+        "And what about Linux?", user_history=("recent user turn",)
     )
 
-    assert enriched.standalone_query == "current question"
-    assert enriched.variants[0] == "current question"
+    assert enriched.standalone_query == "And what about Linux?"
+    assert enriched.variants[0] == "And what about Linux?"
 
 
 def test_rewriter_receives_only_bounded_user_turns():
@@ -90,7 +90,40 @@ def test_enrichment_contract_has_no_authority_or_scope_fields():
 
 def test_rewritten_and_original_routes_are_unique_under_normalization():
     enriched = QueryEnricher(
-        rewriter=lambda _query, _history: "  CURRENT QUESTION  ", max_variants=2
-    ).enrich("current question")
+        rewriter=lambda _query, _history: "  AND WHAT ABOUT LINUX?  ", max_variants=2
+    ).enrich("And what about Linux?", user_history=("VPN reset policy?",))
 
-    assert enriched.variants == ("current question",)
+    assert enriched.variants == ("And what about Linux?",)
+
+
+@pytest.mark.parametrize(
+    "question", ["And what about Linux?", "What about Linux…", "那 VPN 呢？"]
+)
+def test_rewriter_runs_for_explicit_follow_up_markers(question):
+    calls = []
+
+    def rewriter(query, user_turns):
+        calls.append((query, user_turns))
+        return "standalone follow-up"
+
+    enriched = QueryEnricher(rewriter=rewriter).enrich(
+        question, user_history=("VPN reset policy?",)
+    )
+
+    assert calls == [(question, ("VPN reset policy?",))]
+    assert enriched.standalone_query == "standalone follow-up"
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["How do I configure Linux VPN?", "What does the VPN policy require?"],
+)
+def test_standalone_topic_does_not_use_history_rewriter(question):
+    calls = []
+    enriched = QueryEnricher(
+        rewriter=lambda query, turns: calls.append((query, turns)) or "wrong topic"
+    ).enrich(question, user_history=("VPN reset policy?",))
+
+    assert calls == []
+    assert enriched.original_query == question
+    assert enriched.standalone_query == question

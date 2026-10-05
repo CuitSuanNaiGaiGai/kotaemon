@@ -220,7 +220,9 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
                 enricher = self.query_enricher or QueryEnricher(
                     max_variants=retrieval_policy.max_variants
                 )
-                search_kwargs["enriched_query"] = enricher.enrich(text)
+                search_kwargs["enriched_query"] = enricher.enrich(
+                    text, kwargs.get("user_history", ())
+                )
         docs = service.search(text, **search_kwargs)
 
         if self.v3_enabled and self.evidence_expansion and docs:

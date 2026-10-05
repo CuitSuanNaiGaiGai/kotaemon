@@ -244,6 +244,72 @@ def test_prompt_contains_only_displayed_cards_and_preserves_citation_mapping(
     assert "undisplayed candidate" not in user_prompt
 
 
+def test_generation_request_keeps_bounded_user_turns_separate_from_evidence(
+    loopback_ollama,
+):
+    shown = card(text="exact retrieved evidence")
+    client = OllamaLocalClient(
+        endpoint=loopback_ollama.url,
+        count_tokens=lambda _text: 0,
+    )
+
+    client.generate(
+        "And what about Linux?",
+        [shown],
+        user_history=("VPN reset policy?", "What about Windows?"),
+    )
+
+    payload = loopback_ollama.last_json
+    user_message = json.loads(payload["messages"][1]["content"])
+    assert user_message["question"] == "And what about Linux?"
+    assert user_message["user_history"] == [
+        "VPN reset policy?",
+        "What about Windows?",
+    ]
+    assert user_message["evidence"][0]["text"] == "exact retrieved evidence"
+    assert "assistant_history" not in user_message
+
+
+def test_rewrite_request_is_loopback_only_and_contains_user_turns(loopback_ollama):
+    client = OllamaLocalClient(
+        endpoint=loopback_ollama.url,
+        count_tokens=lambda _text: 0,
+    )
+
+    result = client.rewrite_query(
+        "And what about Linux?",
+        ("VPN reset policy?",),
+        timeout=0.5,
+    )
+
+    payload = loopback_ollama.last_json
+    rewrite_input = json.loads(payload["messages"][1]["content"])
+    assert result == "Answer [1]"
+    assert payload["stream"] is False
+    assert payload["options"]["num_predict"] == 128
+    assert rewrite_input == {
+        "question": "And what about Linux?",
+        "user_history": ["VPN reset policy?"],
+    }
+    assert "scope" in payload["messages"][0]["content"].lower()
+
+
+def test_rewrite_timeout_is_bounded(loopback_ollama):
+    loopback_ollama.response_delay = 0.1
+    client = OllamaLocalClient(
+        endpoint=loopback_ollama.url,
+        count_tokens=lambda _text: 0,
+    )
+
+    with pytest.raises(ValueError, match="rewrite request failed") as error:
+        client.rewrite_query(
+            "And what about Linux?", ("VPN reset policy?",), timeout=0.01
+        )
+
+    assert loopback_ollama.request_count == 1
+    assert "Linux" not in str(error.value)
+
+
 def test_packed_chunk_identity_and_explicit_budget_reach_ollama(loopback_ollama):
     shown = card(chunk_id="chunk-packed-1", text="exact packed evidence")
     client = OllamaLocalClient(
