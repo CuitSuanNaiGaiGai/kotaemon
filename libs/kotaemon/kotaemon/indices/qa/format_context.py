@@ -132,6 +132,13 @@ def _format_evidence_unit(
     return EVIDENCE_MODE_TEXT, unit, None
 
 
+def format_evidence_unit(
+    document: RetrievedDocument,
+) -> tuple[int, str, str | None]:
+    """Render one complete citation-ready evidence unit for budget packers."""
+    return _format_evidence_unit(document)
+
+
 def _call_tokenizer(tokenizer: Callable[[str], Any], text: str) -> int:
     result = tokenizer(text)
     if isinstance(result, int):
@@ -200,7 +207,7 @@ class PrepareEvidencePipeline(BaseComponent):
         used_tokens = 0
 
         for retrieved_item in docs:
-            evidence_mode, unit, image_origin = _format_evidence_unit(retrieved_item)
+            evidence_mode, unit, image_origin = format_evidence_unit(retrieved_item)
             metadata = retrieved_item.metadata or {}
             doc_type = metadata.get("type", "")
 
