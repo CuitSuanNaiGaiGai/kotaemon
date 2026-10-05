@@ -32,6 +32,11 @@ def loopback_ollama():
                 {"message": {"content": "Answer [1]"}}
             ).encode("utf-8")
             self.response_delay = 0.0
+            self.stream_parts = None
+            self.stream_first_sent = threading.Event()
+            self.release_stream = threading.Event()
+            self.stream_completed = threading.Event()
+            self.stream_gate = False
             self.url = f"http://127.0.0.1:{self.server_address[1]}"
 
         @property
@@ -71,6 +76,27 @@ def loopback_ollama():
 
             if response_delay:
                 time.sleep(response_delay)
+            if (
+                json.loads(body).get("stream") is True
+                and self.server.stream_parts is not None
+            ):
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/x-ndjson")
+                    self.end_headers()
+                    for index, part in enumerate(self.server.stream_parts):
+                        self.wfile.write(part)
+                        self.wfile.flush()
+                        if index == 0:
+                            self.server.stream_first_sent.set()
+                            if self.server.stream_gate:
+                                self.server.release_stream.wait(timeout=3)
+                    self.server.stream_completed.set()
+                except OSError:
+                    # The streaming client may stop reading after a bounded
+                    # response validation error.
+                    pass
+                return
             self._respond(status, response_body)
 
         def _respond(self, status, body):
@@ -172,6 +198,7 @@ def test_prompt_contains_only_displayed_cards_and_preserves_citation_mapping(
     payload = loopback_ollama.last_json
     assert answer == "Answer [1]"
     assert payload["stream"] is False
+    assert payload["keep_alive"] == "30m"
     assert [message["role"] for message in payload["messages"]] == [
         "system",
         "user",
@@ -267,3 +294,178 @@ def test_uses_configured_finite_timeout(loopback_ollama):
         )
 
     assert loopback_ollama.request_count == 1
+
+
+def _event(value):
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
+
+
+def test_generate_stream_sends_keep_alive_and_returns_content_chunks(loopback_ollama):
+    loopback_ollama.stream_parts = [
+        _event({"message": {"content": "Answer "}, "done": False}),
+        _event({"message": {"content": ""}, "done": False}),
+        _event({"message": {"content": "[1]"}, "done": False}),
+        _event({"message": {"content": ""}, "done": True}),
+    ]
+
+    chunks = list(
+        OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+            "synthetic question", [card(text="synthetic evidence")]
+        )
+    )
+
+    assert chunks == ["Answer ", "[1]"]
+    payload = loopback_ollama.last_json
+    assert payload["stream"] is True
+    assert payload["keep_alive"] == "30m"
+    assert loopback_ollama.request_count == 1
+
+
+def test_generate_stream_yields_before_server_finishes(loopback_ollama):
+    loopback_ollama.stream_gate = True
+    loopback_ollama.stream_parts = [
+        _event({"message": {"content": "first"}, "done": False}),
+        _event({"message": {"content": "second"}, "done": True}),
+    ]
+    chunks = OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+        "synthetic question", [card()]
+    )
+
+    try:
+        assert next(chunks) == "first"
+        assert loopback_ollama.stream_first_sent.wait(timeout=1)
+        assert not loopback_ollama.stream_completed.wait(timeout=0.05)
+        loopback_ollama.release_stream.set()
+        assert list(chunks) == ["second"]
+        assert loopback_ollama.stream_completed.wait(timeout=1)
+    finally:
+        loopback_ollama.release_stream.set()
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        [b"not JSON\n"],
+        [b'{"message":{"content":"invalid utf8 \xff"},"done":true}\n'],
+        [_event(["not", "an", "object"])],
+        [_event({"message": [], "done": True})],
+        [_event({"message": {"content": 3}, "done": True})],
+        [_event({"error": "private server detail"})],
+        [_event({"message": {"content": "partial"}, "done": False})],
+        [
+            _event({"message": {"content": ""}, "done": False}),
+            _event({"message": {"content": ""}, "done": True}),
+        ],
+    ],
+)
+def test_generate_stream_rejects_malformed_or_incomplete_events_without_leaking(
+    loopback_ollama, parts
+):
+    loopback_ollama.stream_parts = parts
+
+    with pytest.raises(ValueError) as error:
+        list(
+            OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+                "private question", [card(text="private evidence")]
+            )
+        )
+
+    assert type(error.value) is ValueError
+    assert "private question" not in str(error.value)
+    assert "private evidence" not in str(error.value)
+    assert "private server detail" not in str(error.value)
+
+
+def test_generate_stream_rejects_a_line_over_the_line_limit(loopback_ollama):
+    loopback_ollama.stream_parts = [
+        _event({"message": {"content": "x" * (1024 * 1024)}, "done": True})
+    ]
+
+    with pytest.raises(ValueError):
+        list(
+            OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+                "synthetic question", [card()]
+            )
+        )
+
+
+def test_generate_stream_rejects_total_response_over_two_mib(loopback_ollama):
+    loopback_ollama.stream_parts = [
+        _event({"message": {"content": "x" * 100_000}, "done": False})
+        for _ in range(22)
+    ]
+    loopback_ollama.stream_parts.append(
+        _event({"message": {"content": "done"}, "done": True})
+    )
+
+    with pytest.raises(ValueError):
+        list(
+            OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+                "synthetic question", [card()]
+            )
+        )
+
+
+def test_generate_stream_hides_http_error_body(loopback_ollama):
+    loopback_ollama.response_status = 500
+    loopback_ollama.response_body = b"private response body"
+
+    with pytest.raises(ValueError) as error:
+        list(
+            OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+                "private question", [card(text="private evidence")]
+            )
+        )
+
+    assert "private question" not in str(error.value)
+    assert "private evidence" not in str(error.value)
+    assert "private response body" not in str(error.value)
+
+
+def test_generate_stream_does_not_follow_redirect(loopback_ollama):
+    loopback_ollama.redirect = True
+    loopback_ollama.stream_parts = [_event({"done": True})]
+
+    with pytest.raises(ValueError):
+        list(
+            OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+                "synthetic question", [card()]
+            )
+        )
+
+    assert loopback_ollama.request_count == 1
+    assert loopback_ollama.redirect_target_count == 0
+
+
+def test_generate_stream_ignores_proxy_environment(loopback_ollama, monkeypatch):
+    for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+    loopback_ollama.stream_parts = [
+        _event({"message": {"content": "local"}, "done": True})
+    ]
+
+    chunks = list(
+        OllamaLocalClient(endpoint=loopback_ollama.url).generate_stream(
+            "synthetic question", [card()]
+        )
+    )
+
+    assert chunks == ["local"]
+    assert loopback_ollama.request_count == 1
+
+
+def test_generate_stream_timeout_is_a_value_error(loopback_ollama):
+    loopback_ollama.response_delay = 0.2
+    loopback_ollama.stream_parts = [_event({"done": True})]
+
+    with pytest.raises(ValueError):
+        list(
+            OllamaLocalClient(
+                endpoint=loopback_ollama.url, timeout=0.05
+            ).generate_stream("synthetic question", [card()])
+        )

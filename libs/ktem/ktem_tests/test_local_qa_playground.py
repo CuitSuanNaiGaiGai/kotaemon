@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import gradio as gr
 import pytest
 
+import ktem.local_qa_playground as playground
 from ktem.local_qa_core import EvidenceCard
 from ktem.local_qa_playground import (
     answer_question,
@@ -34,12 +36,33 @@ class FakeGenerator:
         self.error = error
         self.model = model
         self.calls = []
+        self.stream_calls = []
 
     def generate(self, question, cards):
         self.calls.append((question, cards))
         if self.error is not None:
             raise self.error
         return self.answer
+
+    def generate_stream(self, question, cards):
+        self.stream_calls.append((question, cards))
+        if self.error is not None:
+            raise self.error
+        yield self.answer
+
+
+class ChunkedGenerator(FakeGenerator):
+    def __init__(self, chunks, *, error_after_chunks=None):
+        super().__init__()
+        self.chunks = list(chunks)
+        self.error_after_chunks = error_after_chunks
+
+    def generate_stream(self, question, cards):
+        self.stream_calls.append((question, cards))
+        for chunk in self.chunks:
+            yield chunk
+        if self.error_after_chunks is not None:
+            raise self.error_after_chunks
 
 
 def card(
@@ -166,6 +189,87 @@ def test_generator_value_error_preserves_evidence_and_hides_error_details():
     assert evidence[0]["text"] == "synthetic visible chunk"
 
 
+def test_stream_answer_yields_evidence_first_and_preserves_final_answer(monkeypatch):
+    clock = iter([0.0, 0.01, 0.02, 0.03])
+    monkeypatch.setattr(playground, "monotonic", lambda: next(clock), raising=False)
+    evidence_card = card(text="synthetic streamed evidence")
+    events = []
+
+    class OrderedQA(FakeQA):
+        def retrieve(self, question):
+            events.append("retrieved")
+            return super().retrieve(question)
+
+    class OrderedGenerator(ChunkedGenerator):
+        def generate_stream(self, question, cards):
+            events.append("generation started")
+            yield from super().generate_stream(question, cards)
+
+    qa = OrderedQA(cards=[evidence_card])
+    generator = OrderedGenerator(["The ", "answer", " is 42."])
+    updates = playground.stream_answer_question(qa, generator, "synthetic question")
+
+    status, evidence = next(updates)
+    assert status == "Generating locally…"
+    assert evidence[0]["text"] == "synthetic streamed evidence"
+    assert events == ["retrieved"]
+    assert list(updates) == [("The answer is 42.", gr.skip())]
+    assert events == ["retrieved", "generation started"]
+    assert generator.stream_calls == [("synthetic question", (evidence_card,))]
+
+
+def test_stream_answer_coalesces_chunks_at_a_bounded_interval(monkeypatch):
+    clock = iter([0.0, 0.04, 0.08, 0.12, 0.13])
+    monkeypatch.setattr(playground, "monotonic", lambda: next(clock), raising=False)
+    qa = FakeQA(cards=[card(text="synthetic evidence")])
+    generator = ChunkedGenerator(["a", "b", "c", "d"])
+
+    updates = list(
+        playground.stream_answer_question(qa, generator, "synthetic question")
+    )
+
+    assert updates[0][0] == "Generating locally…"
+    assert updates[0][1][0]["text"] == "synthetic evidence"
+    assert updates[1:] == [("abc", gr.skip()), ("abcd", gr.skip())]
+
+
+def test_stream_answer_failure_preserves_evidence_and_hides_error_details(monkeypatch):
+    clock = iter([0.0, 0.01])
+    monkeypatch.setattr(playground, "monotonic", lambda: next(clock), raising=False)
+    evidence_card = card(text="synthetic evidence")
+    qa = FakeQA(cards=[evidence_card])
+    generator = ChunkedGenerator(
+        ["partial"],
+        error_after_chunks=ValueError("synthetic question; synthetic evidence"),
+    )
+
+    updates = list(
+        playground.stream_answer_question(qa, generator, "synthetic question")
+    )
+
+    assert updates[0][0] == "Generating locally…"
+    assert updates[0][1][0]["text"] == "synthetic evidence"
+    failure, retained_evidence = updates[1]
+    assert retained_evidence == gr.skip()
+    assert "generation failed" in failure.lower()
+    assert "synthetic question" not in failure
+    assert "synthetic evidence" not in failure
+
+
+def test_stream_answer_blank_and_no_evidence_inputs_yield_once():
+    qa = FakeQA(cards=[])
+    generator = FakeGenerator()
+
+    assert list(playground.stream_answer_question(qa, generator, "  \n ")) == [
+        ("Enter a question.", [])
+    ]
+    assert list(playground.stream_answer_question(qa, generator, "unknown")) == [
+        ("No evidence was retrieved from the frozen snapshot.", [])
+    ]
+    assert qa.calls == ["unknown"]
+    assert generator.stream_calls == []
+
+
 def test_ui_wires_ask_and_clear_and_disables_analytics():
     evidence_card = card(text="synthetic UI evidence")
     qa = FakeQA(cards=[evidence_card])
@@ -225,27 +329,34 @@ def test_ui_wires_ask_and_clear_and_disables_analytics():
     clear_event = next(
         event for event in dependencies if (clear_id, "click") in event["targets"]
     )
+    cancel_event = next(
+        event
+        for event in dependencies
+        if (clear_id, "click") in event["targets"] and event["types"]["cancel"]
+    )
 
     assert ask_event["inputs"] == [question_id]
     assert ask_event["outputs"] == [answer_id, evidence_id]
     ask_fn = demo.fns[ask_event["id"]].fn
-    assert ask_fn("Which evidence?") == (
-        "synthetic UI answer",
-        [
-            {
-                "source_rank": 1,
-                "chunk_rank": 1,
-                "source": "synthetic/doc.md",
-                "locator": {"page": 2},
-                "score": 0.75,
-                "text": "synthetic UI evidence",
-            }
-        ],
-    )
-    assert generator.calls == [("Which evidence?", (evidence_card,))]
+    expected_evidence = [
+        {
+            "source_rank": 1,
+            "chunk_rank": 1,
+            "source": "synthetic/doc.md",
+            "locator": {"page": 2},
+            "score": 0.75,
+            "text": "synthetic UI evidence",
+        }
+    ]
+    assert list(ask_fn("Which evidence?")) == [
+        ("Generating locally…", expected_evidence),
+        ("synthetic UI answer", gr.skip()),
+    ]
+    assert generator.stream_calls == [("Which evidence?", (evidence_card,))]
 
     assert clear_event["inputs"] == []
     assert clear_event["outputs"] == [question_id, answer_id, evidence_id]
+    assert cancel_event["cancels"] == [ask_event["id"]]
     clear_fn = demo.fns[clear_event["id"]].fn
     assert clear_fn() == ("", "", [])
 
