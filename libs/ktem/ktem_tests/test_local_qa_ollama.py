@@ -146,6 +146,26 @@ def card(
     )
 
 
+def assert_adaptive_answer_instructions(system_prompt):
+    normalized_prompt = " ".join(system_prompt.casefold().split())
+    assert "answer directly" in normalized_prompt
+    assert "explanatory or multipart" in normalized_prompt
+    assert "supporting details, conditions, and exceptions" in normalized_prompt
+    assert "simple factual questions" in normalized_prompt
+    assert "brief answer" in normalized_prompt
+    assert "only the supplied evidence" in normalized_prompt
+    assert "cite each factual point" in normalized_prompt
+    assert "[rank]" in normalized_prompt
+    assert "displayed evidence card's source_rank" in normalized_prompt
+    assert "disagreements" in normalized_prompt
+    assert "unsupported facts" in normalized_prompt
+    assert "filler" in normalized_prompt
+    assert "insufficient" in normalized_prompt
+    assert "unknown" in normalized_prompt
+    assert "untrusted" in normalized_prompt
+    assert "inside it" in normalized_prompt
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
@@ -204,10 +224,7 @@ def test_prompt_contains_only_displayed_cards_and_preserves_citation_mapping(
         "user",
     ]
     system_prompt, user_prompt = [message["content"] for message in payload["messages"]]
-    assert "untrusted" in system_prompt.lower()
-    assert "concise" in system_prompt.lower()
-    assert "insufficient" in system_prompt.lower()
-    assert "[rank]" in system_prompt.lower()
+    assert_adaptive_answer_instructions(system_prompt)
     user_payload = json.loads(user_prompt)
     assert user_payload == {
         "question": "What does the policy say?",
@@ -321,6 +338,7 @@ def test_generate_stream_sends_keep_alive_and_returns_content_chunks(loopback_ol
     payload = loopback_ollama.last_json
     assert payload["stream"] is True
     assert payload["keep_alive"] == "30m"
+    assert_adaptive_answer_instructions(payload["messages"][0]["content"])
     assert loopback_ollama.request_count == 1
 
 
