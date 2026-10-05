@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from hashlib import sha256
 
 import pytest
 from ktem.index.file import pipelines
@@ -30,14 +31,23 @@ class FixtureReader(BaseReader):
         self.last_extra_info = None
         self.side_effects = side_effects if side_effects is not None else []
         self.metadata_overrides = {}
+        self.document_text = None
+        self.omit_source_version = False
 
     def load_data(self, file, extra_info=None, **kwargs):
         self.side_effects.append("load_data")
         self.last_extra_info = dict(extra_info or {})
+        metadata = {**(extra_info or {}), **self.metadata_overrides}
+        if self.omit_source_version:
+            metadata.pop("source_version", None)
         return [
             Document(
-                text="# Intro\n\nBody\n\n## Details\n\nDetails",
-                metadata={**(extra_info or {}), **self.metadata_overrides},
+                text=(
+                    self.document_text
+                    if self.document_text is not None
+                    else "# Intro\n\nBody\n\n## Details\n\nDetails"
+                ),
+                metadata=metadata,
             )
         ]
 
@@ -78,6 +88,8 @@ def index_pipeline_fixture(monkeypatch, tmp_path):
     class Source(base):
         __tablename__ = "fixture_source"
         id = Column(String, primary_key=True)
+        path = Column(String)
+        size = Column(Integer)
         note = Column(MutableDict.as_mutable(JSON))
 
     class Index(base):
@@ -104,6 +116,11 @@ def index_pipeline_fixture(monkeypatch, tmp_path):
 
         def store_file(self, file_path):
             pipeline_side_effects.append("store_file")
+            with Session(engine) as session:
+                source = session.get(Source, source_id)
+                source.path = sha256(file_path.read_bytes()).hexdigest()
+                source.size = file_path.stat().st_size
+                session.commit()
             return source_id
 
     reader = FixtureReader(side_effects=pipeline_side_effects)
@@ -191,10 +208,13 @@ def test_stream_persists_caller_knowledge_metadata(index_pipeline_fixture, tmp_p
         "virtual_path": "/Interns/App/Zhang San",
         "document_name": "Zhang San.md",
         "entity": {},
+        "source_version": sha256(input_path.read_bytes()).hexdigest(),
     }
 
 
-@pytest.mark.parametrize("reserved_key", ["file_id", "document_id", "collection_name"])
+@pytest.mark.parametrize(
+    "reserved_key", ["file_id", "document_id", "collection_name", "source_version"]
+)
 def test_stream_rejects_caller_identity_metadata_before_indexing(
     index_pipeline_fixture, tmp_path, reserved_key
 ):
@@ -250,6 +270,7 @@ def test_stream_preserves_custom_metadata_and_trusted_reader_identity(
         "virtual_path": "/Interns/App/Fixture",
         "document_name": "logical-fixture.md",
         "entity": {"owner": "Zhang San"},
+        "source_version": sha256(input_path.read_bytes()).hexdigest(),
     }
 
 
@@ -385,7 +406,122 @@ def test_finish_normalizes_caller_summary_and_merges_knowledge(
         "virtual_path": "/Interns/Zhang San",
         "document_name": "logical.md",
         "entity": {"owner": "Zhang San"},
+        "source_version": sha256(input_path.read_bytes()).hexdigest(),
     }
+
+
+def test_product_metadata_roundtrip_keeps_locator(index_pipeline_fixture, tmp_path):
+    pipeline, reader, docstore, vectorstore, _, _ = index_pipeline_fixture
+    input_path = tmp_path / "located.md"
+    input_path.write_bytes(b"uploaded bytes v1")
+    expected_version = sha256(input_path.read_bytes()).hexdigest()
+    reader.document_text = (
+        "# A\n\n" + "alpha beta gamma delta " * 24 + "\n\n# B\n\nomega"
+    )
+    reader.metadata_overrides = {"page_label": "page-7"}
+    pipeline.splitter = TokenSplitter(chunk_size=12, chunk_overlap=0)
+
+    consume_stream(
+        pipeline.stream(
+            input_path,
+            knowledge_metadata={"virtual_path": "/Policies/Located"},
+        )
+    )
+
+    stored = docstore.get_all()
+    assert len(stored) > 2
+    assert {document.doc_id for document in stored} == set(vectorstore.metadata_by_id)
+    assert all(
+        vectorstore.metadata_by_id[document.doc_id] == document.metadata
+        for document in stored
+    )
+    assert all(
+        document.metadata["source_version"] == expected_version for document in stored
+    )
+    assert all(document.metadata["page_label"] == "page-7" for document in stored)
+    assert all(document.metadata["chunk_id"] == document.doc_id for document in stored)
+    assert all(document.metadata["unit_id"] for document in stored)
+
+    units = {}
+    for document in stored:
+        units.setdefault(document.metadata["unit_id"], []).append(document)
+    assert len(units) == 2
+    for unit_chunks in units.values():
+        ordered = sorted(
+            unit_chunks, key=lambda document: document.metadata["chunk_ordinal"]
+        )
+        assert [document.metadata["chunk_ordinal"] for document in ordered] == list(
+            range(len(ordered))
+        )
+        assert "previous_chunk_id" not in ordered[0].metadata
+        assert "next_chunk_id" not in ordered[-1].metadata
+        for left, right in zip(ordered, ordered[1:]):
+            assert left.metadata["next_chunk_id"] == right.doc_id
+            assert right.metadata["previous_chunk_id"] == left.doc_id
+
+
+@pytest.mark.parametrize("reader_mutation", ["omit", "overwrite"])
+def test_stream_enforces_source_version_from_uploaded_bytes(
+    index_pipeline_fixture, tmp_path, reader_mutation
+):
+    pipeline, reader, docstore, vectorstore, _, get_source = index_pipeline_fixture
+    input_path = tmp_path / "reader-version.md"
+    input_path.write_bytes(b"the uploaded source bytes")
+    expected_version = sha256(input_path.read_bytes()).hexdigest()
+    reader.document_text = "# Section\n\n" + "same unit chunk " * 30
+    pipeline.splitter = TokenSplitter(chunk_size=12, chunk_overlap=0)
+    if reader_mutation == "omit":
+        reader.omit_source_version = True
+    else:
+        reader.metadata_overrides = {"source_version": "reader-controlled-value"}
+
+    consume_stream(pipeline.stream(input_path))
+
+    stored = docstore.get_all()
+    assert len(stored) > 1
+    assert all(
+        document.metadata["source_version"] == expected_version for document in stored
+    )
+    assert all(document.metadata["unit_id"] for document in stored)
+    assert all(
+        vectorstore.metadata_by_id[document.doc_id] == document.metadata
+        for document in stored
+    )
+    assert get_source().note["knowledge"]["source_version"] == expected_version
+
+
+def test_url_locator_hash_is_not_claimed_as_content_version(
+    index_pipeline_fixture, monkeypatch
+):
+    pipeline, reader, docstore, _, source_id, _ = index_pipeline_fixture
+    url = "https://example.test/policies"
+    with Session(pipelines.engine) as session:
+        source = session.get(pipeline.Source, source_id)
+        source.path = sha256(url.encode("utf-8")).hexdigest()
+        session.commit()
+
+    assert pipeline._source_version(source_id, url) is None
+
+    def store_fixture_url(self, _url):
+        with Session(pipelines.engine) as session:
+            source = session.get(self.Source, source_id)
+            source.path = sha256(url.encode("utf-8")).hexdigest()
+            session.commit()
+        return source_id
+
+    monkeypatch.setattr(type(pipeline), "store_url", store_fixture_url)
+    reader.metadata_overrides = {"source_type": "markdown"}
+    consume_stream(pipeline.stream(url))
+
+    stored = docstore.get_all()
+    assert stored
+    assert all("source_version" not in document.metadata for document in stored)
+    assert all(
+        "_semantic_unit_group_id" not in document.metadata for document in stored
+    )
+    with Session(pipelines.engine) as session:
+        source = session.get(pipeline.Source, source_id)
+    assert "source_version" not in source.note["knowledge"]
 
 
 def test_default_chroma_accepts_knowledge_metadata(index_pipeline_fixture, tmp_path):

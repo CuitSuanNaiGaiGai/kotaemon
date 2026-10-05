@@ -10,12 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
-from .local_corpus import (
-    SourceFile,
-    canonical_sources,
-    scan_sources,
-    unsupported_paths,
-)
+from .local_corpus import SourceFile, canonical_sources, scan_sources, unsupported_paths
 
 _CHUNK_CONFIG_VERSION = "main-token-only-v1"
 _CHUNK_SIZE = 1024
@@ -100,6 +95,9 @@ class ReaderDiagnostic:
     attempted_readers: tuple[str, ...]
     fallback_used: bool
     granularity: str
+    extraction_granularity: str
+    parser_version: str | None = None
+    fallback_reason: str | None = None
     needs_review: bool = False
     detail: str | None = None
 
@@ -202,6 +200,8 @@ def _reader_diagnostic(
     fallback_used: bool,
     granularity: str,
     *,
+    parser_version: str | None = None,
+    fallback_reason: str | None = None,
     needs_review: bool = False,
     detail: str | None = None,
 ) -> ReaderDiagnostic:
@@ -212,6 +212,9 @@ def _reader_diagnostic(
         attempted_readers=attempted_readers,
         fallback_used=fallback_used,
         granularity=granularity,
+        extraction_granularity=granularity,
+        parser_version=parser_version,
+        fallback_reason=fallback_reason,
         needs_review=needs_review,
         detail=detail,
     )
@@ -263,6 +266,7 @@ def _load_reader_documents(
                     (unstructured_name, fallback_name),
                     True,
                     "document",
+                    fallback_reason="UnstructuredReader_import_error",
                     needs_review=True,
                     detail=(
                         "Local Unstructured partitioning raised ImportError; "
@@ -277,6 +281,7 @@ def _load_reader_documents(
                     (unstructured_name, fallback_name),
                     True,
                     "document",
+                    fallback_reason="UnstructuredReader_and_DocxReader_failed",
                     needs_review=True,
                     detail="Unstructured and DocxReader fallback both failed",
                 )
@@ -828,6 +833,24 @@ def build_local_draft(
             ),
             "reader_granularity": (
                 reader_diagnostic_by_id[source.source_id].granularity
+                if source.duplicate_of is None
+                and source.source_id in reader_diagnostic_by_id
+                else None
+            ),
+            "reader_extraction_granularity": (
+                reader_diagnostic_by_id[source.source_id].extraction_granularity
+                if source.duplicate_of is None
+                and source.source_id in reader_diagnostic_by_id
+                else None
+            ),
+            "reader_parser_version": (
+                reader_diagnostic_by_id[source.source_id].parser_version
+                if source.duplicate_of is None
+                and source.source_id in reader_diagnostic_by_id
+                else None
+            ),
+            "reader_fallback_reason": (
+                reader_diagnostic_by_id[source.source_id].fallback_reason
                 if source.duplicate_of is None
                 and source.source_id in reader_diagnostic_by_id
                 else None

@@ -33,6 +33,18 @@ EXTENSION_SOURCE_TYPES = {
     ".hpp": "code",
 }
 
+CHUNK_IDENTITY_METADATA_KEYS = frozenset(
+    {
+        "source_version",
+        "unit_id",
+        "chunk_ordinal",
+        "previous_chunk_id",
+        "next_chunk_id",
+        "char_start",
+        "char_end",
+    }
+)
+
 
 def infer_source_type(metadata: Mapping[str, Any], document_name=None) -> str:
     """Return a supported explicit type or infer it from a document extension."""
@@ -67,7 +79,11 @@ def _first_present(*values):
 def normalize_knowledge_metadata(
     document: Document, overrides: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Return a canonical metadata copy without mutating ``document``."""
+    """Return a canonical metadata copy without mutating ``document``.
+
+    Chunk identity fields pass through when they were explicitly stamped. This
+    normalizer does not synthesize identity or adjacency for legacy chunks.
+    """
     metadata = dict(document.metadata or {})
     metadata.update(dict(overrides or {}))
 

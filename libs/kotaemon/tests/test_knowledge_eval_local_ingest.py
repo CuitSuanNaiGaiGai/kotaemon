@@ -258,6 +258,51 @@ def test_normalization_preserves_paragraphs_and_baseline_splits(tmp_path):
     for chunk in chunks:
         assert 0 <= chunk.char_start <= chunk.char_end <= len(unit.normalized_text)
         assert chunk.text == unit.normalized_text[chunk.char_start : chunk.char_end]
-    assert [chunk.chunk_id for chunk in chunks] == [
+    assert [
+        chunk.chunk_id for chunk in first.chunks if chunk.relative_path == "notes.md"
+    ] == [
         chunk.chunk_id for chunk in second.chunks if chunk.relative_path == "notes.md"
     ]
+
+
+def test_parser_fallback_is_recorded(tmp_path, monkeypatch):
+    from kotaemon.base import Document
+    from kotaemon.indices.knowledge.evaluation import local_ingest
+
+    root = tmp_path / "sources"
+    root.mkdir()
+    (root / "fallback.docx").write_bytes(b"synthetic upload")
+
+    def synthetic_reader(source, _path):
+        diagnostic = local_ingest._reader_diagnostic(
+            source,
+            "DocxReader(local fallback)",
+            ("UnstructuredReader(split_documents=True)", "DocxReader(local fallback)"),
+            True,
+            "document",
+            parser_version=None,
+            fallback_reason="preferred_reader_import_error",
+        )
+        return (
+            [
+                Document(
+                    text="A synthetic fallback parser output.",
+                    metadata={"category": "NarrativeText"},
+                )
+            ],
+            diagnostic,
+            None,
+        )
+
+    monkeypatch.setattr(local_ingest, "_load_reader_documents", synthetic_reader)
+    summary = build_local_draft(root, tmp_path / "draft")
+
+    diagnostic = summary.quality.reader_diagnostics[0]
+    assert diagnostic.parser_version is None
+    assert diagnostic.fallback_reason == "preferred_reader_import_error"
+    assert diagnostic.extraction_granularity == "document"
+    records = json.loads(summary.records_payload)
+    source = records["sources"][0]
+    assert source["reader_parser_version"] is None
+    assert source["reader_fallback_reason"] == "preferred_reader_import_error"
+    assert source["reader_extraction_granularity"] == "document"

@@ -40,6 +40,10 @@ from kotaemon.indices.ingests.files import (
     unstructured,
     web_reader,
 )
+from kotaemon.indices.knowledge.chunking.identity import (
+    source_version_for_path,
+    stamp_chunk_identity,
+)
 from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
 from kotaemon.indices.knowledge.metadata import normalize_knowledge_metadata
 from kotaemon.indices.knowledge.retrieval.trace import trace_event, trace_scoped
@@ -51,7 +55,7 @@ from .knowledge_service import create_file_knowledge_service
 
 logger = logging.getLogger(__name__)
 _INDEXING_IDENTITY_METADATA_KEYS = frozenset(
-    {"file_id", "document_id", "collection_name"}
+    {"file_id", "document_id", "collection_name", "source_version"}
 )
 
 
@@ -370,8 +374,9 @@ class IndexPipeline(BaseComponent):
 
     def _split_and_normalize_text_docs(self, documents):
         output = []
-        for document in documents:
+        for parser_unit_ordinal, document in enumerate(documents):
             document.metadata = normalize_knowledge_metadata(document)
+            document.metadata["_parser_unit_ordinal"] = parser_unit_ordinal
             if self.splitter:
                 strategy = get_chunk_strategy(
                     document.metadata["source_type"], self.splitter
@@ -379,9 +384,22 @@ class IndexPipeline(BaseComponent):
                 chunks = strategy.split(document)
             else:
                 chunks = [document]
-            for chunk in chunks:
-                chunk.metadata = normalize_knowledge_metadata(chunk)
-                output.append(chunk)
+            source_version = document.metadata.get("source_version")
+            if source_version:
+                chunks = stamp_chunk_identity(
+                    document, chunks, source_version=source_version
+                )
+            else:
+                for chunk in chunks:
+                    chunk.metadata = normalize_knowledge_metadata(chunk)
+                    for key in (
+                        "_parser_unit_ordinal",
+                        "_semantic_unit_group_id",
+                        "source_unit_text",
+                    ):
+                        chunk.metadata.pop(key, None)
+            document.metadata.pop("_parser_unit_ordinal", None)
+            output.extend(chunks)
         return output
 
     def handle_docs(self, docs, file_id, file_name) -> Generator[Document, None, int]:
@@ -553,8 +571,7 @@ class IndexPipeline(BaseComponent):
         Returns:
             the file id
         """
-        with file_path.open("rb") as fi:
-            file_hash = sha256(fi.read()).hexdigest()
+        file_hash = source_version_for_path(file_path)
 
         shutil.copy(file_path, self.FSPath / file_hash)
         source = self.Source(
@@ -570,11 +587,30 @@ class IndexPipeline(BaseComponent):
 
         return file_id
 
+    def _source_version(self, file_id: str, file_path: str | Path) -> str | None:
+        """Return an upload-byte hash; URL locators do not identify content bytes."""
+        if not isinstance(file_path, Path):
+            return None
+        path_column = getattr(self.Source, "path", None)
+        stored_path = None
+        if path_column is not None:
+            with Session(engine) as session:
+                stmt = select(path_column).where(self.Source.id == file_id)
+                stored_path = session.execute(stmt).scalar_one_or_none()
+        if isinstance(stored_path, str) and len(stored_path) == 64:
+            try:
+                int(stored_path, 16)
+                return stored_path.lower()
+            except ValueError:
+                pass
+        return source_version_for_path(file_path)
+
     def finish(
         self,
         file_id: str,
         file_path: str | Path,
         knowledge_metadata: dict | None = None,
+        source_version: str | None = None,
     ) -> str:
         """Finish the indexing"""
         with Session(engine) as session:
@@ -600,28 +636,33 @@ class IndexPipeline(BaseComponent):
             # populate the note
             note["loader"] = self.get_from_path("loader").__class__.__name__
             file_name = file_path.name if isinstance(file_path, Path) else file_path
+            resolved_source_version = (
+                source_version
+                if source_version is not None
+                else self._source_version(file_id, file_path)
+            )
+            normalized_metadata = {
+                "file_id": file_id,
+                "file_name": file_name,
+                **(knowledge_metadata or {}),
+            }
+            normalized_metadata.pop("source_version", None)
+            if resolved_source_version is not None:
+                normalized_metadata["source_version"] = resolved_source_version
             normalized = normalize_knowledge_metadata(
-                Document(
-                    text="",
-                    metadata={
-                        "file_id": file_id,
-                        "file_name": file_name,
-                        **(knowledge_metadata or {}),
-                    },
-                )
+                Document(text="", metadata=normalized_metadata)
             )
             knowledge = dict(note.get("knowledge") or {})
-            knowledge.update(
-                {
-                    key: normalized[key]
-                    for key in (
-                        "source_type",
-                        "virtual_path",
-                        "document_name",
-                        "entity",
-                    )
-                }
-            )
+            knowledge.pop("source_version", None)
+            knowledge_keys = [
+                "source_type",
+                "virtual_path",
+                "document_name",
+                "entity",
+            ]
+            if resolved_source_version is not None:
+                knowledge_keys.append("source_version")
+            knowledge.update({key: normalized[key] for key in knowledge_keys})
             note["knowledge"] = knowledge
             item.note = note
 
@@ -721,13 +762,27 @@ class IndexPipeline(BaseComponent):
         extra_info["file_id"] = file_id
         extra_info["collection_name"] = self.collection_name
         extra_info.update(knowledge_metadata or {})
+        source_version = self._source_version(file_id, file_path)
+        if source_version is not None:
+            extra_info["source_version"] = source_version
 
         yield Document(f" => Converting {file_name} to text", channel="debug")
         docs = self.loader.load_data(file_path, extra_info=extra_info)
+        for document in docs:
+            document.metadata = dict(document.metadata or {})
+            if source_version is None:
+                document.metadata.pop("source_version", None)
+            else:
+                document.metadata["source_version"] = source_version
         yield Document(f" => Converted {file_name} to text", channel="debug")
         yield from self.handle_docs(docs, file_id, file_name)
 
-        self.finish(file_id, file_path, knowledge_metadata=knowledge_metadata)
+        self.finish(
+            file_id,
+            file_path,
+            knowledge_metadata=knowledge_metadata,
+            source_version=source_version,
+        )
 
         yield Document(f" => Finished indexing {file_name}", channel="debug")
         return file_id, docs
