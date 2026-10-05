@@ -9,13 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from ktem import local_qa_core
+from ktem.local_qa_core import EvidenceCard, LocalQA, open_playground
 
 from kotaemon.base import Document, DocumentWithEmbedding, RetrievedDocument
 from kotaemon.embeddings import BaseEmbeddings
 from kotaemon.indices.knowledge.evaluation.local_models import LocalModelPaths
 from kotaemon.indices.knowledge.evaluation.local_snapshot import load_local_snapshot
-from ktem import local_qa_core
-from ktem.local_qa_core import EvidenceCard, LocalQA, open_playground
 
 
 def _json_bytes(value):
@@ -556,19 +556,16 @@ def test_ambiguous_repeated_chunk_uses_recorded_locator(tmp_path, monkeypatch):
     )
 
     question = "alpha unique target phrase"
-    candidates = qa._service.search(question, top_k=20)
-    unresolved_candidate = next(
-        candidate
-        for candidate in candidates
-        if candidate.doc_id in qa._bundle["unresolved_offsets"]
-        and qa._bundle["chunk_to_source"][candidate.doc_id] == source_ids[0]
-    )
-    unresolved = qa._bundle["unresolved_offsets"][unresolved_candidate.doc_id]
     cards = qa.retrieve(question)
-
-    assert any(
-        card.source_id == source_ids[0]
-        and card.text == unresolved_candidate.text
-        and card.locator == dict(unresolved.locator)
+    unresolved_cards = [
+        card
         for card in cards
+        if card.source_id == source_ids[0]
+        and card.chunk_id in qa._bundle["unresolved_offsets"]
+    ]
+
+    assert unresolved_cards
+    assert all(
+        card.locator == dict(qa._bundle["unresolved_offsets"][card.chunk_id].locator)
+        for card in unresolved_cards
     )

@@ -116,9 +116,17 @@ class KnowledgeService:
             trace_event(trace, "no_search", reason="no_visible_sources")
             return []
 
-        normalized_path = normalize_logical_path(path) if path is not None else None
-        normalized_types = self._normalize_source_types(source_types)
-        normalized_filters = self._normalize_filters(filters, visible_sources)
+        (
+            normalized_path,
+            normalized_types,
+            normalized_filters,
+            mandatory_sources,
+        ) = self._resolve_constraints(
+            visible_sources,
+            path=path,
+            source_types=source_types,
+            filters=filters,
+        )
         trace_event(
             trace,
             "explicit_filters",
@@ -127,16 +135,6 @@ class KnowledgeService:
             metadata_filters=normalized_filters,
         )
 
-        mandatory_sources = [
-            source
-            for source in visible_sources
-            if self._matches_constraints(
-                source,
-                path=normalized_path,
-                source_types=normalized_types if source_types is not None else None,
-                filters=normalized_filters,
-            )
-        ]
         mandatory_ids = [source.source_id for source in mandatory_sources]
         if not mandatory_ids:
             trace_event(
@@ -216,6 +214,40 @@ class KnowledgeService:
         return [
             document for document in documents if document.doc_id in authorized_chunks
         ]
+
+    def authorized_chunk_ids(
+        self,
+        *,
+        path: str | None = None,
+        source_types: Sequence[str] | None = None,
+        filters: Mapping[str, Any] | None = None,
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> frozenset[str]:
+        """Return chunks in the same hard source scope used by ``search``.
+
+        The caller allowlist is intersected with the catalog's visible sources
+        before path, type, and entity filters are resolved. This is intended for
+        follow-on evidence operations that must stay within the original search
+        authorization boundary.
+        """
+        if allowed_source_ids is not None and not self._normalize_ids(
+            allowed_source_ids
+        ):
+            return frozenset()
+        visible_sources = self._visible_sources(allowed_source_ids)
+        if not visible_sources:
+            return frozenset()
+        _path, _types, _filters, mandatory_sources = self._resolve_constraints(
+            visible_sources,
+            path=path,
+            source_types=source_types,
+            filters=filters,
+        )
+        mandatory_ids = [source.source_id for source in mandatory_sources]
+        if not mandatory_ids:
+            return frozenset()
+        chunk_map = self.catalog.chunk_ids(mandatory_ids, relation_type="document")
+        return frozenset(self._flatten_chunks(mandatory_ids, chunk_map))
 
     def read(
         self,
@@ -344,6 +376,36 @@ class KnowledgeService:
                 continue
             visible.setdefault(source_id, source)
         return [visible[source_id] for source_id in sorted(visible)]
+
+    @classmethod
+    def _resolve_constraints(
+        cls,
+        visible_sources: Sequence[KnowledgeSource],
+        *,
+        path: str | None,
+        source_types: Sequence[str] | None,
+        filters: Mapping[str, Any] | None,
+    ):
+        """Resolve caller constraints once for search and authorized follow-ups."""
+        normalized_path = normalize_logical_path(path) if path is not None else None
+        normalized_types = cls._normalize_source_types(source_types)
+        normalized_filters = cls._normalize_filters(filters, visible_sources)
+        mandatory_sources = [
+            source
+            for source in visible_sources
+            if cls._matches_constraints(
+                source,
+                path=normalized_path,
+                source_types=(normalized_types if source_types is not None else None),
+                filters=normalized_filters,
+            )
+        ]
+        return (
+            normalized_path,
+            normalized_types,
+            normalized_filters,
+            mandatory_sources,
+        )
 
     @staticmethod
     def _normalize_ids(source_ids: Sequence[str] | None) -> list[str]:

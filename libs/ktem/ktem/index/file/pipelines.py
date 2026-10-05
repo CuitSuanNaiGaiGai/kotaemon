@@ -46,6 +46,13 @@ from kotaemon.indices.knowledge.chunking.identity import (
 )
 from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
 from kotaemon.indices.knowledge.metadata import normalize_knowledge_metadata
+from kotaemon.indices.knowledge.planning.query_enrichment import QueryEnricher
+from kotaemon.indices.knowledge.retrieval.contracts import RetrievalPolicy
+from kotaemon.indices.knowledge.retrieval.expansion import (
+    ChunkResolver,
+    ExpansionPolicy,
+    expand_evidence,
+)
 from kotaemon.indices.knowledge.retrieval.trace import trace_event, trace_scoped
 from kotaemon.indices.rankings import BaseReranking, LLMReranking, LLMTrulensScoring
 from kotaemon.indices.splitters import BaseSplitter, TokenSplitter
@@ -106,6 +113,12 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
     mmr: bool = False
     top_k: int = 5
     retrieval_mode: str = "hybrid"
+    v3_enabled: bool = False
+    candidate_k: int = 20
+    max_fused_candidates: int = 40
+    query_enrichment: bool = False
+    evidence_expansion: bool = False
+    query_enricher: Optional[QueryEnricher] = None
 
     @Node.auto(depends_on=["embedding", "VS", "DS"])
     def vector_retrieval(self) -> VectorRetrieval:
@@ -178,12 +191,84 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
 
         # Preserve the caller's exact source allowlist at the service boundary.
         s_time = time.time()
-        docs = service.search(
-            text,
-            top_k=self.top_k,
-            allowed_source_ids=doc_ids,
-            trace=trace,
-        )
+        search_kwargs = {
+            "top_k": self.top_k,
+            "allowed_source_ids": doc_ids,
+            "trace": trace,
+        }
+        if self.v3_enabled:
+            retrieval_policy = RetrievalPolicy(
+                enabled=True,
+                candidate_k=self.candidate_k,
+                max_fused_candidates=self.max_fused_candidates,
+            )
+            trace_event(
+                trace,
+                "product_retrieval_config",
+                v3_enabled=True,
+                candidate_k=self.candidate_k,
+                max_fused_candidates=self.max_fused_candidates,
+                chunk_seed_k=self.top_k,
+                query_enrichment=self.query_enrichment,
+                evidence_expansion=self.evidence_expansion,
+            )
+            search_kwargs["retrieval_policy"] = retrieval_policy
+            for key in ("path", "source_types", "filters"):
+                if kwargs.get(key) is not None:
+                    search_kwargs[key] = kwargs[key]
+            if self.query_enrichment:
+                enricher = self.query_enricher or QueryEnricher(
+                    max_variants=retrieval_policy.max_variants
+                )
+                search_kwargs["enriched_query"] = enricher.enrich(text)
+        docs = service.search(text, **search_kwargs)
+
+        if self.v3_enabled and self.evidence_expansion and docs:
+            allowed_chunk_ids = service.authorized_chunk_ids(
+                path=kwargs.get("path"),
+                source_types=kwargs.get("source_types"),
+                filters=kwargs.get("filters"),
+                allowed_source_ids=doc_ids,
+            )
+            scorer = next(
+                (
+                    reranker
+                    for reranker in self.rerankers
+                    if callable(getattr(reranker, "score_pairs", None))
+                ),
+                None,
+            )
+            bundle = expand_evidence(
+                docs,
+                query=text,
+                resolver=ChunkResolver(
+                    docstore=service.docstore, catalog=service.catalog
+                ),
+                allowed_chunk_ids=allowed_chunk_ids,
+                scorer=scorer,
+                policy=ExpansionPolicy(),
+            )
+            seeds = list(bundle.seeds)
+            expansions = list(bundle.expansions)
+            for document in seeds:
+                document.metadata = {
+                    **dict(document.metadata or {}),
+                    "knowledge_evidence_role": "seed",
+                }
+            for document in expansions:
+                document.metadata = {
+                    **dict(document.metadata or {}),
+                    "knowledge_evidence_role": "expansion",
+                }
+            docs = seeds + expansions
+            trace_event(
+                trace,
+                "evidence_expansion",
+                decisions=list(bundle.decisions),
+                seed_ids=[document.doc_id for document in seeds],
+                expanded_ids=[document.doc_id for document in expansions],
+                authorized_chunk_count=len(allowed_chunk_ids),
+            )
         print("retrieval step took", time.time() - s_time)
 
         if not self.get_extra_table:
@@ -256,6 +341,31 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
             reranking_llm_choices = []
 
         return {
+            "v3_enabled": {
+                "name": "Enable v3 retrieval",
+                "value": False,
+                "component": "checkbox",
+            },
+            "candidate_k": {
+                "name": "V3 candidates per route",
+                "value": 20,
+                "component": "number",
+            },
+            "max_fused_candidates": {
+                "name": "V3 maximum fused candidates",
+                "value": 40,
+                "component": "number",
+            },
+            "query_enrichment": {
+                "name": "Enable query enrichment",
+                "value": False,
+                "component": "checkbox",
+            },
+            "evidence_expansion": {
+                "name": "Enable authorized evidence expansion",
+                "value": False,
+                "component": "checkbox",
+            },
             "reranking_llm": {
                 "name": "LLM for relevant scoring",
                 "value": reranking_llm,
@@ -320,6 +430,11 @@ class DocumentRetrievalPipeline(BaseFileIndexRetriever):
                 )
             ],
             retrieval_mode=user_settings["retrieval_mode"],
+            v3_enabled=user_settings.get("v3_enabled", False),
+            candidate_k=user_settings.get("candidate_k", 20),
+            max_fused_candidates=user_settings.get("max_fused_candidates", 40),
+            query_enrichment=user_settings.get("query_enrichment", False),
+            evidence_expansion=user_settings.get("evidence_expansion", False),
             llm_scorer=(LLMTrulensScoring() if use_llm_reranking else None),
             rerankers=[
                 reranking_models_manager[

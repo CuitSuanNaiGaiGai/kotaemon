@@ -16,15 +16,8 @@ from typing import Any, Literal, Mapping, Sequence
 
 from kotaemon.base import Document, DocumentWithEmbedding
 from kotaemon.embeddings import BaseEmbeddings
-from kotaemon.indices import VectorIndexing, VectorRetrieval
+from kotaemon.indices import VectorRetrieval
 from kotaemon.indices.knowledge.chunking.registry import get_chunk_strategy
-from kotaemon.models.local_bge import (
-    EMBEDDING_MODEL_ID,
-    RERANKER_MODEL_ID,
-    BgeM3Embeddings,
-    BgeM3Reranking,
-    LocalModelPaths,
-)
 from kotaemon.indices.knowledge.evaluation.local_ingest import DraftChunk
 from kotaemon.indices.knowledge.evaluation.local_snapshot import LocalSnapshot
 from kotaemon.indices.knowledge.evaluation.retrieval_eval import (
@@ -37,15 +30,24 @@ from kotaemon.indices.knowledge.evaluation.source_metrics import (
     score_source_run,
     source_ranked_chunks,
 )
-from kotaemon.indices.knowledge.metadata import infer_source_type
-from kotaemon.indices.knowledge.planning.query_planner import (
-    KnowledgeSource,
-)
-from kotaemon.indices.knowledge.planning.retrieval_plan import RetrievalPlan
 from kotaemon.indices.knowledge.retrieval import KnowledgeService, RetrievalTrace
+from kotaemon.indices.knowledge.retrieval.contracts import RetrievalPolicy
 from kotaemon.indices.rankings import BaseReranking
 from kotaemon.indices.splitters import TokenSplitter
-from kotaemon.storages import InMemoryDocumentStore, InMemoryVectorStore
+from kotaemon.models.local_bge import (
+    EMBEDDING_MODEL_ID,
+    RERANKER_MODEL_ID,
+    BgeM3Embeddings,
+    BgeM3Reranking,
+    LocalModelPaths,
+)
+
+from .snapshot_adapter import SnapshotCatalog as _SnapshotCatalog  # noqa: F401
+from .snapshot_adapter import (
+    _GlobalIdentityPlanner,
+    build_snapshot_documents,
+    build_snapshot_runtime,
+)
 
 K = 5
 CANDIDATE_K = 20
@@ -189,58 +191,6 @@ def _create_reranker(
         revision=revision,
         weight_source=weight_source,
     )
-
-
-class _SnapshotCatalog:
-    """Small in-memory source and chunk catalog built only from snapshot data."""
-
-    def __init__(
-        self, sources: Sequence[KnowledgeSource], chunk_map: Mapping[str, Sequence[str]]
-    ):
-        self._sources = tuple(sources)
-        self._chunk_map = {key: tuple(value) for key, value in chunk_map.items()}
-
-    def list_sources(self, allowed_source_ids=None):
-        if allowed_source_ids is None:
-            return list(self._sources)
-        allowed = set(allowed_source_ids)
-        return [source for source in self._sources if source.source_id in allowed]
-
-    def chunk_ids(self, source_ids, relation_type="document"):
-        if relation_type != "document":
-            raise ValueError(
-                "The local experiment catalog supports document chunks only"
-            )
-        return {
-            source_id: list(self._chunk_map.get(source_id, ()))
-            for source_id in source_ids
-        }
-
-
-class _GlobalIdentityPlanner:
-    """Keep each query global while retaining explicit reviewed constraints."""
-
-    def plan(
-        self,
-        query: str,
-        catalog,
-        *,
-        path: str | None = None,
-        source_types: Sequence[str] | None = None,
-        filters: Mapping[str, Any] | None = None,
-        allowed_source_ids: Sequence[str] | None = None,
-    ) -> RetrievalPlan:
-        del catalog, allowed_source_ids
-        return RetrievalPlan(
-            query=query,
-            semantic_query=query,
-            source_types=tuple(source_types or ()),
-            virtual_paths=() if path is None else (path,),
-            metadata_filters=dict(filters or {}),
-            confidence=0.0,
-            reason="global identity plan; caller constraints remain enforced",
-            source_ids=None,
-        )
 
 
 class _AuditedReranker:
@@ -393,127 +343,31 @@ def _build_chunk_documents(
     dict[str, DraftChunk],
     dict[str, _UnresolvedChunkOffsets],
 ]:
-    source_by_id = {source["source_id"]: source for source in snapshot.selected_sources}
-    units = [
-        unit
-        for unit in snapshot.records["source_units"]
-        if unit["source_id"] in source_by_id
-    ]
-    if not units:
-        raise ValueError("The reviewed snapshot has no selected source units")
-
-    token_splitter = TokenSplitter(
-        chunk_size=1024,
-        chunk_overlap=256,
-        separator="\n\n",
-        backup_separators=["\n", ".", " ", "\u200b"],
-    )
-    strategies = {}
-    chunks: list[Document] = []
-    chunk_to_source: dict[str, str] = {}
-    source_chunks: dict[str, list[str]] = {}
-    source_types: dict[str, str] = {}
-    draft_chunks: dict[str, DraftChunk] = {}
-    unresolved_offsets: dict[str, _UnresolvedChunkOffsets] = {}
-    for unit in units:
-        source_id = unit["source_id"]
-        source = source_by_id[source_id]
-        source_type = infer_source_type({}, "source" + source["suffix"])
-        source_types[source_id] = source_type
-        metadata = {
-            "source_id": source_id,
-            "unit_id": unit["unit_id"],
-            "unit_ordinal": unit["unit_ordinal"],
-            "document_id": source_id,
-            "virtual_path": "/",
-            "source_type": source_type,
-            "section_path": [],
-            "entity": {},
-            **dict(unit["locator"]),
-        }
-        source_document = Document(
-            text=unit["normalized_text"],
-            id_=unit["unit_id"],
-            metadata=metadata,
-        )
-        if chunking_arm:
-            strategy = strategies.get(source_type)
-            if strategy is None:
-                strategy = get_chunk_strategy(source_type, token_splitter)
-                strategies[source_type] = strategy
-        else:
-            strategy = get_chunk_strategy("other", token_splitter)
-
-        split_documents = strategy.split(source_document)
-        for ordinal, split_document in enumerate(split_documents):
-            if not split_document.text:
-                continue
-            chunk_id = (
-                "local-"
-                + hashlib.sha256(
-                    f"{unit['unit_id']}\0{ordinal}\0{split_document.text}".encode(
-                        "utf-8"
-                    )
-                ).hexdigest()[:24]
-            )
-            chunk_metadata = dict(split_document.metadata or {})
-            chunk_metadata.update(
-                source_id=source_id,
-                unit_id=unit["unit_id"],
-                unit_ordinal=unit["unit_ordinal"],
-                source_type=source_type,
-                virtual_path="/",
-                document_id=source_id,
-                chunk_id=chunk_id,
-                parent_id=unit["unit_id"],
-            )
-            chunks.append(
-                Document(
-                    text=split_document.text,
-                    id_=chunk_id,
-                    metadata=chunk_metadata,
-                )
-            )
-            spans = _text_spans(unit["normalized_text"], split_document.text)
-            if len(spans) == 1:
-                span = spans[0]
-                draft_chunks[chunk_id] = DraftChunk(
-                    chunk_id=chunk_id,
-                    source_id=source_id,
-                    relative_path=unit["relative_path"],
-                    unit_id=unit["unit_id"],
-                    unit_ordinal=unit["unit_ordinal"],
-                    chunk_ordinal=ordinal,
-                    locator=dict(unit["locator"]),
-                    text=split_document.text,
-                    char_start=span[0],
-                    char_end=span[1],
-                )
-            else:
-                unresolved_offsets[chunk_id] = _UnresolvedChunkOffsets(
-                    source_id=source_id,
-                    unit_id=unit["unit_id"],
-                    locator=dict(unit["locator"]),
-                    candidate_spans=spans,
-                )
-            chunk_to_source[chunk_id] = source_id
-            source_chunks.setdefault(source_id, []).append(chunk_id)
-
-    if not chunks:
-        raise ValueError("The reviewed snapshot produced no non-empty chunks")
-    duplicate_ids = len(chunk_to_source) != len(chunks)
-    if duplicate_ids:
-        raise ValueError("Chunk generation produced duplicate chunk IDs")
-    chunk_map = {
-        source_id: tuple(sorted(ids)) for source_id, ids in source_chunks.items()
-    }
-    return (
+    mode = "registry" if chunking_arm else "token"
+    (
         chunks,
         chunk_to_source,
         chunk_map,
         source_types,
         draft_chunks,
         unresolved_offsets,
+        _locators,
+    ) = build_snapshot_documents(snapshot, chunking_mode=mode)
+    return (
+        chunks,
+        chunk_to_source,
+        chunk_map,
+        source_types,
+        draft_chunks,
+        {
+            chunk_id: _UnresolvedChunkOffsets(
+                source_id=item.source_id,
+                unit_id=item.unit_id,
+                locator=item.locator,
+                candidate_spans=item.candidate_spans,
+            )
+            for chunk_id, item in unresolved_offsets.items()
+        },
     )
 
 
@@ -523,49 +377,38 @@ def _make_bundle(
     embedding: BaseEmbeddings,
     chunking_arm: bool,
 ):
-    (
-        chunks,
-        chunk_to_source,
-        chunk_map,
-        source_types,
-        draft_chunks,
-        unresolved_offsets,
-    ) = _build_chunk_documents(snapshot, chunking_arm=chunking_arm)
-    vector_store = InMemoryVectorStore()
-    doc_store = InMemoryDocumentStore()
-    indexer = VectorIndexing(
-        vector_store=vector_store,
-        doc_store=doc_store,
+    runtime = build_snapshot_runtime(
+        snapshot,
         embedding=embedding,
-    )
-    indexer.run(chunks)
-    catalog = _SnapshotCatalog(
-        [
-            KnowledgeSource(
-                source_id=source["source_id"],
-                source_type=infer_source_type({}, "source" + source["suffix"]),
-                virtual_path="/",
-                entity={},
-            )
-            for source in snapshot.selected_sources
-        ],
-        chunk_map,
+        reranker=None,
+        policy=RetrievalPolicy(enabled=False, candidate_k=CANDIDATE_K),
+        chunking_mode="registry" if chunking_arm else "token",
+        lexical=False,
     )
     sources_by_id = {
         source["source_id"]: source for source in snapshot.selected_sources
     }
     return {
-        "chunks": chunks,
-        "chunk_to_source": chunk_to_source,
-        "chunk_map": chunk_map,
-        "source_types": source_types,
-        "draft_chunks": draft_chunks,
-        "unresolved_offsets": unresolved_offsets,
-        "vector_store": indexer.vector_store,
-        "doc_store": indexer.doc_store,
+        "chunks": list(runtime.documents),
+        "chunk_to_source": runtime.chunk_to_source,
+        "chunk_map": runtime.chunk_map,
+        "source_types": runtime.source_types,
+        "draft_chunks": runtime.draft_chunks,
+        "unresolved_offsets": {
+            chunk_id: _UnresolvedChunkOffsets(
+                source_id=item.source_id,
+                unit_id=item.unit_id,
+                locator=item.locator,
+                candidate_spans=item.candidate_spans,
+            )
+            for chunk_id, item in runtime.unresolved_offsets.items()
+        },
+        "vector_store": runtime.vector_store,
+        "doc_store": runtime.docstore,
         "embedding": embedding,
-        "catalog": catalog,
+        "catalog": runtime.catalog,
         "sources_by_id": sources_by_id,
+        "runtime": runtime,
     }
 
 

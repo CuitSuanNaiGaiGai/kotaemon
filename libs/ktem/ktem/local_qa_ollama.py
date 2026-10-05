@@ -12,8 +12,9 @@ from collections.abc import Iterator, Sequence
 from numbers import Real
 from typing import Any
 
-from ktem.local_qa_core import EvidenceCard
+from ktem.local_qa_core import EvidenceCard, render_generation_context
 
+from kotaemon.indices.knowledge.retrieval.context_budget import GenerationBudget
 
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_STREAM_LINE_BYTES = 256 * 1024
@@ -74,7 +75,7 @@ def _validate_model(model: str) -> str:
 def _card_payload(card: EvidenceCard) -> dict[str, Any]:
     if not isinstance(card, EvidenceCard):
         raise ValueError("cards must contain EvidenceCard values")
-    return {
+    payload = {
         "source_rank": card.source_rank,
         "chunk_rank": card.chunk_rank,
         "source_id": card.source_id,
@@ -83,6 +84,9 @@ def _card_payload(card: EvidenceCard) -> dict[str, Any]:
         "score": card.score,
         "text": card.text,
     }
+    if card.chunk_id is not None:
+        payload["chunk_id"] = card.chunk_id
+    return payload
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -99,6 +103,11 @@ class OllamaLocalClient:
         model: str = "qwen2.5:7b",
         *,
         timeout: float = 120.0,
+        model_context: int = 32768,
+        output_reserve: int = 2048,
+        format_reserve: int = 256,
+        count_tokens=None,
+        tokenizer=None,
     ):
         self.endpoint = _validate_endpoint(endpoint)
         self.model = _validate_model(model)
@@ -110,6 +119,90 @@ class OllamaLocalClient:
         ):
             raise ValueError("Ollama timeout must be a finite positive number")
         self.timeout = float(timeout)
+        if (
+            isinstance(model_context, bool)
+            or not isinstance(model_context, int)
+            or model_context <= 0
+        ):
+            raise ValueError("model_context must be a positive integer")
+        if (
+            isinstance(output_reserve, bool)
+            or not isinstance(output_reserve, int)
+            or output_reserve <= 0
+        ):
+            raise ValueError("output_reserve must be a positive integer")
+        if (
+            isinstance(format_reserve, bool)
+            or not isinstance(format_reserve, int)
+            or format_reserve < 0
+        ):
+            raise ValueError("format_reserve must be a non-negative integer")
+
+        loaded_tokenizer = tokenizer
+        if count_tokens is None and loaded_tokenizer is None:
+            loaded_tokenizer = self._load_local_qwen_tokenizer(self.model)
+        if count_tokens is not None and not callable(count_tokens):
+            raise ValueError("count_tokens must be callable")
+        if loaded_tokenizer is not None and count_tokens is None:
+            encode = getattr(loaded_tokenizer, "encode", None)
+            if not callable(encode):
+                raise ValueError("tokenizer must expose encode(text)")
+
+            def count_with_local_tokenizer(text: str) -> int:
+                return len(encode(text, add_special_tokens=False))
+
+            count_tokens = count_with_local_tokenizer
+        self.count_tokens = count_tokens or self._estimated_token_count
+        self.generation_budget = GenerationBudget(
+            model_context=model_context,
+            output_reserve=output_reserve,
+            format_reserve=format_reserve,
+            estimated=(loaded_tokenizer is None and count_tokens is None),
+        )
+
+    @staticmethod
+    def _estimated_token_count(text: str) -> int:
+        return len(text.encode("utf-8"))
+
+    @staticmethod
+    def _load_local_qwen_tokenizer(model: str):
+        """Use a cached matching Qwen tokenizer without allowing a download."""
+        normalized = model.casefold().split(":", 1)[0].replace("-", "")
+        aliases = {
+            "qwen2.5": "Qwen/Qwen2.5-7B-Instruct",
+            "qwen2.5:0.5b": "Qwen/Qwen2.5-0.5B-Instruct",
+            "qwen2.5:1.5b": "Qwen/Qwen2.5-1.5B-Instruct",
+            "qwen2.5:3b": "Qwen/Qwen2.5-3B-Instruct",
+            "qwen2.5:7b": "Qwen/Qwen2.5-7B-Instruct",
+            "qwen2.5:14b": "Qwen/Qwen2.5-14B-Instruct",
+            "qwen2.5:32b": "Qwen/Qwen2.5-32B-Instruct",
+            "qwen2.5:72b": "Qwen/Qwen2.5-72B-Instruct",
+        }
+        # Keep the original tag available for exact size lookup before a model
+        # quantization suffix is stripped.
+        model_tag = model.casefold().split(":", 1)
+        repository = aliases.get(
+            f"{model_tag[0]}:{model_tag[1].split('-', 1)[0]}"
+            if len(model_tag) == 2
+            else model_tag[0]
+        )
+        if repository is None and normalized == "qwen2.5":
+            repository = aliases["qwen2.5"]
+        if repository is None:
+            return None
+        try:
+            from transformers import AutoTokenizer
+
+            return AutoTokenizer.from_pretrained(
+                repository,
+                local_files_only=True,
+                trust_remote_code=False,
+            )
+        except Exception:
+            return None
+
+    def base_prompt(self, _question: str = "") -> str:
+        return _SYSTEM_PROMPT
 
     def _request_body(
         self,
@@ -124,25 +217,44 @@ class OllamaLocalClient:
             raise ValueError("cards must be a sequence of EvidenceCard values")
 
         try:
-            prompt = json.dumps(
-                {
-                    "question": question,
-                    "evidence": [_card_payload(card) for card in cards],
+            prompt = render_generation_context(question, cards)
+            payload = {
+                "model": self.model,
+                "stream": stream,
+                "keep_alive": "30m",
+                "options": {
+                    "num_ctx": self.generation_budget.model_context,
+                    "num_predict": self.generation_budget.output_reserve,
                 },
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            rendered_messages = json.dumps(
+                payload["messages"],
                 ensure_ascii=False,
                 allow_nan=False,
                 separators=(",", ":"),
             )
+            message_tokens = self.count_tokens(rendered_messages)
+            if (
+                isinstance(message_tokens, bool)
+                or not isinstance(message_tokens, int)
+                or message_tokens < 0
+            ):
+                raise ValueError("token counter must return a non-negative integer")
+            if (
+                message_tokens
+                + self.generation_budget.output_reserve
+                + self.generation_budget.format_reserve
+                > self.generation_budget.model_context
+            ):
+                raise ValueError(
+                    "rendered Ollama request exceeds the configured context budget"
+                )
             request_body = json.dumps(
-                {
-                    "model": self.model,
-                    "stream": stream,
-                    "keep_alive": "30m",
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
+                payload,
                 ensure_ascii=False,
                 allow_nan=False,
                 separators=(",", ":"),

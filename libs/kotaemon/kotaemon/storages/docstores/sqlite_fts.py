@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import unicodedata
 from collections.abc import Callable
 from typing import Optional, Union
@@ -94,9 +95,14 @@ class SQLiteFTSDocumentStore(BaseDocumentStore):
     def __init__(
         self,
         *,
-        connection_factory: Callable[[str], sqlite3.Connection] = sqlite3.connect,
+        connection_factory: Callable[[str], sqlite3.Connection] | None = None,
     ):
-        self._connection = connection_factory(":memory:")
+        self._connection = (
+            sqlite3.connect(":memory:", check_same_thread=False)
+            if connection_factory is None
+            else connection_factory(":memory:")
+        )
+        self._lock = threading.RLock()
         self._connection.execute(
             "CREATE TABLE documents ("
             "id TEXT PRIMARY KEY, text TEXT NOT NULL, metadata TEXT NOT NULL)"
@@ -129,49 +135,53 @@ class SQLiteFTSDocumentStore(BaseDocumentStore):
             docs = [docs]
         doc_ids = ids if ids else [doc.doc_id for doc in docs]
 
-        for doc_id, document in zip(doc_ids, docs):
-            existing = self._connection.execute(
-                "SELECT 1 FROM documents WHERE id = ?", (doc_id,)
-            ).fetchone()
-            if existing is not None and not exist_ok:
-                raise ValueError(f"Document with id {doc_id} already exist")
+        with self._lock:
+            for doc_id, document in zip(doc_ids, docs):
+                existing = self._connection.execute(
+                    "SELECT 1 FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()
+                if existing is not None and not exist_ok:
+                    raise ValueError(f"Document with id {doc_id} already exist")
 
-            text = document.text or ""
-            metadata = json.dumps(document.metadata, ensure_ascii=False)
-            self._connection.execute(
-                "INSERT OR REPLACE INTO documents (id, text, metadata) VALUES (?, ?, ?)",
-                (doc_id, text, metadata),
-            )
-            if self.supports_lexical_search:
+                text = document.text or ""
+                metadata = json.dumps(document.metadata, ensure_ascii=False)
                 self._connection.execute(
-                    "DELETE FROM documents_fts WHERE id = ?", (doc_id,)
+                    "INSERT OR REPLACE INTO documents (id, text, metadata) VALUES (?, ?, ?)",
+                    (doc_id, text, metadata),
                 )
-                self._connection.execute(
-                    "INSERT INTO documents_fts (id, tokens) VALUES (?, ?)",
-                    (doc_id, " ".join(lexical_tokens(text))),
-                )
+                if self.supports_lexical_search:
+                    self._connection.execute(
+                        "DELETE FROM documents_fts WHERE id = ?", (doc_id,)
+                    )
+                    self._connection.execute(
+                        "INSERT INTO documents_fts (id, tokens) VALUES (?, ?)",
+                        (doc_id, " ".join(lexical_tokens(text))),
+                    )
 
     def get(self, ids: Union[list[str], str]) -> list[Document]:
         if not isinstance(ids, list):
             ids = [ids]
         documents: list[Document] = []
-        for doc_id in ids:
-            row = self._connection.execute(
-                "SELECT id, text, metadata FROM documents WHERE id = ?", (doc_id,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(doc_id)
-            documents.append(self._document_from_row(row))
+        with self._lock:
+            for doc_id in ids:
+                row = self._connection.execute(
+                    "SELECT id, text, metadata FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(doc_id)
+                documents.append(self._document_from_row(row))
         return documents
 
     def get_all(self) -> list[Document]:
-        rows = self._connection.execute(
-            "SELECT id, text, metadata FROM documents ORDER BY rowid"
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, text, metadata FROM documents ORDER BY rowid"
+            ).fetchall()
         return [self._document_from_row(row) for row in rows]
 
     def count(self) -> int:
-        row = self._connection.execute("SELECT COUNT(*) FROM documents").fetchone()
+        with self._lock:
+            row = self._connection.execute("SELECT COUNT(*) FROM documents").fetchone()
         return int(row[0])
 
     def query(
@@ -199,38 +209,44 @@ class SQLiteFTSDocumentStore(BaseDocumentStore):
             parameters.extend(doc_ids)
         parameters.append(top_k)
 
-        rows = self._connection.execute(
-            "SELECT documents.id, documents.text, documents.metadata "
-            "FROM documents_fts JOIN documents ON documents.id = documents_fts.id "
-            "WHERE documents_fts MATCH ?"
-            + allowlist_sql
-            + " ORDER BY bm25(documents_fts) ASC, documents.id ASC LIMIT ?",
-            parameters,
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT documents.id, documents.text, documents.metadata "
+                "FROM documents_fts JOIN documents ON documents.id = documents_fts.id "
+                "WHERE documents_fts MATCH ?"
+                + allowlist_sql
+                + " ORDER BY bm25(documents_fts) ASC, documents.id ASC LIMIT ?",
+                parameters,
+            ).fetchall()
         return [self._document_from_row(row) for row in rows]
 
     def delete(self, ids: Union[list[str], str]):
         if not isinstance(ids, list):
             ids = [ids]
-        for doc_id in ids:
-            exists = self._connection.execute(
-                "SELECT 1 FROM documents WHERE id = ?", (doc_id,)
-            ).fetchone()
-            if exists is None:
-                raise KeyError(doc_id)
-            if self.supports_lexical_search:
+        with self._lock:
+            for doc_id in ids:
+                exists = self._connection.execute(
+                    "SELECT 1 FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(doc_id)
+                if self.supports_lexical_search:
+                    self._connection.execute(
+                        "DELETE FROM documents_fts WHERE id = ?", (doc_id,)
+                    )
                 self._connection.execute(
-                    "DELETE FROM documents_fts WHERE id = ?", (doc_id,)
+                    "DELETE FROM documents WHERE id = ?", (doc_id,)
                 )
-            self._connection.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
     def drop(self):
-        if self.supports_lexical_search:
-            self._connection.execute("DELETE FROM documents_fts")
-        self._connection.execute("DELETE FROM documents")
+        with self._lock:
+            if self.supports_lexical_search:
+                self._connection.execute("DELETE FROM documents_fts")
+            self._connection.execute("DELETE FROM documents")
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     @staticmethod
     def _document_from_row(row) -> Document:

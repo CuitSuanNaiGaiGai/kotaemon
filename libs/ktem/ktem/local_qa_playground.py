@@ -10,9 +10,7 @@ from time import monotonic
 from typing import Any
 
 import gradio as gr
-
-from ktem.local_qa_core import LocalQA
-from ktem.local_qa_core import open_playground
+from ktem.local_qa_core import LocalQA, open_playground
 from ktem.local_qa_ollama import OllamaLocalClient
 
 _STREAM_UPDATE_INTERVAL = 0.1
@@ -22,23 +20,16 @@ def answer_question(
     qa: LocalQA,
     generator: OllamaLocalClient,
     question: str,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, Any]:
     clean_question = question.strip()
     if not clean_question:
         return "Enter a question.", []
 
-    cards = qa.retrieve(clean_question)
-    evidence = [
-        {
-            "source_rank": card.source_rank,
-            "chunk_rank": card.chunk_rank,
-            "source": card.source_label,
-            "locator": dict(card.locator),
-            "score": card.score,
-            "text": card.text,
-        }
-        for card in cards
-    ]
+    cards, evidence, status = _retrieve_generation_evidence(
+        qa, generator, clean_question
+    )
+    if status == "insufficient_evidence":
+        return "No seed evidence fits within the configured context budget.", evidence
     if not cards:
         return "No evidence was retrieved from the frozen snapshot.", []
 
@@ -56,24 +47,18 @@ def stream_answer_question(
     qa: LocalQA,
     generator: OllamaLocalClient,
     question: str,
-) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+) -> Iterator[tuple[str, Any]]:
     clean_question = question.strip()
     if not clean_question:
         yield "Enter a question.", []
         return
 
-    cards = qa.retrieve(clean_question)
-    evidence = [
-        {
-            "source_rank": card.source_rank,
-            "chunk_rank": card.chunk_rank,
-            "source": card.source_label,
-            "locator": dict(card.locator),
-            "score": card.score,
-            "text": card.text,
-        }
-        for card in cards
-    ]
+    cards, evidence, status = _retrieve_generation_evidence(
+        qa, generator, clean_question
+    )
+    if status == "insufficient_evidence":
+        yield "No seed evidence fits within the configured context budget.", evidence
+        return
     if not cards:
         yield "No evidence was retrieved from the frozen snapshot.", []
         return
@@ -105,6 +90,67 @@ def stream_answer_question(
         yield answer, gr.skip()
 
 
+def _retrieve_generation_evidence(qa, generator, question):
+    retrieve_result = getattr(qa, "retrieve_result", None)
+    if callable(retrieve_result):
+        options = {}
+        generation_budget = getattr(generator, "generation_budget", None)
+        count_tokens = getattr(generator, "count_tokens", None)
+        base_prompt = getattr(generator, "base_prompt", None)
+        if generation_budget is not None:
+            options["generation_budget"] = generation_budget
+            options["count_tokens"] = count_tokens
+            options["base_prompt"] = (
+                base_prompt(question) if callable(base_prompt) else ""
+            )
+        result = retrieve_result(question, **options)
+        cards = tuple(result.cards)
+        diagnostics = dict(result.diagnostics or {})
+        evidence_cards = [
+            {
+                "source_rank": card.source_rank,
+                "chunk_rank": card.chunk_rank,
+                "source": card.source_label,
+                "locator": dict(card.locator),
+                "score": card.score,
+                "text": card.text,
+            }
+            for card in cards
+        ]
+        if diagnostics or result.status == "insufficient_evidence":
+            diagnostics["generation_budget"] = (
+                "estimated"
+                if diagnostics.get("budget_estimated") is True
+                else (
+                    "measured"
+                    if diagnostics.get("budget_estimated") is False
+                    else "not_configured"
+                )
+            )
+            evidence = {
+                "cards": evidence_cards,
+                "diagnostics": diagnostics,
+                "status": result.status,
+            }
+        else:
+            evidence = evidence_cards
+        return cards, evidence, result.status
+
+    cards = tuple(qa.retrieve(question))
+    evidence = [
+        {
+            "source_rank": card.source_rank,
+            "chunk_rank": card.chunk_rank,
+            "source": card.source_label,
+            "locator": dict(card.locator),
+            "score": card.score,
+            "text": card.text,
+        }
+        for card in cards
+    ]
+    return cards, evidence, "ready" if cards else "no_evidence"
+
+
 def clear_outputs() -> tuple[str, str, list[dict[str, Any]]]:
     return "", "", []
 
@@ -117,9 +163,13 @@ def build_ui(
 ) -> gr.Blocks:
     description = (
         f"Frozen snapshot version: `{snapshot_version}`. "
-        "Retrieval uses local BGE-M3 embeddings with baseline token chunks, "
-        "a pool of 20 vector candidates, and a window showing the top five "
-        "distinct sources. "
+        "Retrieval uses local BGE-M3 embeddings over baseline token chunks, "
+        "a local cross-encoder when its verified weights are available, "
+        "ephemeral FTS5 diagnostics, a pool of 20 vector candidates, and a "
+        "seed window from the top five distinct sources (chunk seed K=20; source K=5). "
+        "Evidence expansion is scope-checked and generation context is packed "
+        "before Ollama receives it. Diagnostics report unavailable routes and "
+        "estimated token budgets. "
         f"Answer generation uses the configured local model `{generator.model}`."
     )
 

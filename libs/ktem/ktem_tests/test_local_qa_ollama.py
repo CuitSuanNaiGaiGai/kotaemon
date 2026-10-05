@@ -9,8 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-
-from ktem.local_qa_core import EvidenceCard
+from ktem.local_qa_core import EvidenceCard, render_generation_context
 from ktem.local_qa_ollama import OllamaLocalClient
 
 
@@ -134,6 +133,7 @@ def card(
     locator=None,
     score=0.8,
     text="shown text",
+    chunk_id=None,
 ):
     return EvidenceCard(
         source_rank=source_rank,
@@ -143,6 +143,7 @@ def card(
         locator=locator if locator is not None else {"page": 2},
         score=score,
         text=text,
+        chunk_id=chunk_id,
     )
 
 
@@ -241,6 +242,52 @@ def test_prompt_contains_only_displayed_cards_and_preserves_citation_mapping(
         ],
     }
     assert "undisplayed candidate" not in user_prompt
+
+
+def test_packed_chunk_identity_and_explicit_budget_reach_ollama(loopback_ollama):
+    shown = card(chunk_id="chunk-packed-1", text="exact packed evidence")
+    client = OllamaLocalClient(
+        endpoint=loopback_ollama.url,
+        model="synthetic:local",
+        model_context=4096,
+        output_reserve=256,
+        format_reserve=64,
+        count_tokens=len,
+    )
+
+    assert client.generate("packed question", [shown]) == "Answer [1]"
+    payload = loopback_ollama.last_json
+    assert payload["options"] == {"num_ctx": 4096, "num_predict": 256}
+    assert payload["messages"][1]["content"] == render_generation_context(
+        "packed question", [shown]
+    )
+    assert (
+        json.loads(payload["messages"][1]["content"])["evidence"][0]["chunk_id"]
+        == "chunk-packed-1"
+    )
+
+
+def test_rejects_rendered_messages_over_budget_before_request(loopback_ollama):
+    client = OllamaLocalClient(
+        endpoint=loopback_ollama.url,
+        model="synthetic:local",
+        model_context=256,
+        output_reserve=64,
+        format_reserve=16,
+        count_tokens=len,
+    )
+
+    with pytest.raises(ValueError, match="JSON-compatible"):
+        client.generate("oversized question", [card(text="x" * 512)])
+
+    assert loopback_ollama.request_count == 0
+
+
+def test_byte_fallback_is_explicitly_estimated():
+    client = OllamaLocalClient(model="synthetic:local")
+
+    assert client.generation_budget.estimated is True
+    assert client.count_tokens("你好") == len("你好".encode("utf-8"))
 
 
 def test_ignores_proxy_environment_for_loopback(loopback_ollama, monkeypatch):
