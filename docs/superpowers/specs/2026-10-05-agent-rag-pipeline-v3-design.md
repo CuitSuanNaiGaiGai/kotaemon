@@ -72,10 +72,14 @@ Existing Markdown headings, FAQ pairs, Python AST units, PDF/PPT structural
 metadata, Excel rows, and token fallback remain the chunking choices.
 
 Newly indexed chunks also carry a stable source version, source-unit ID,
-ordinal within that unit, and available source offsets. They preserve the real
-chunk ID, page/row/section locator, and parent relation. A parent ID is not
-treated as a readable document unless the docstore actually stores it. Older
-chunks lacking adjacency metadata remain searchable and simply skip expansion.
+ordinal within that unit, and the real IDs of their immediate previous and
+next chunks in that unit. They preserve the real chunk ID, page/row/section
+locator, parent relation, and available source offsets. Neighbor lookup reads
+only the at-most-two IDs recorded on a seed, after checking both IDs against
+the caller's authorized chunk set; it then validates source, version, unit,
+and ordinal on the fetched records. A parent ID is not treated as a readable
+document unless the docstore actually stores it. Older chunks lacking
+adjacency metadata remain searchable and simply skip expansion.
 The v2 approved snapshot is never reparsed in place.
 
 ### Query enrichment and multi-turn retrieval
@@ -102,8 +106,13 @@ independent single-turn v2 gold.
 Each recall route records query variant, branch, rank, candidate IDs, status,
 and available backend score. The product can use its current lexical backend;
 the local snapshot gains an ephemeral SQLite FTS5 index so the workbench can
-exercise a real lexical route without changing its frozen source files. Where
-FTS5 or a product docstore cannot do lexical search, the trace says
+exercise a real lexical route without changing its frozen source files. Its
+index text uses deterministic Unicode normalization, Latin/code token
+extraction, and overlapping Chinese character bigrams before FTS5 `unicode61`
+indexing. A Chinese term inside a longer sentence and a Latin term adjacent
+to Chinese text must both be retrievable in synthetic tests. This is a
+bounded lexical baseline, not a claim that it matches a dedicated Chinese
+segmenter. Where FTS5 or a product docstore cannot do lexical search, the trace says
 `unavailable` and the dense route remains usable. BGE-M3 stays the local dense
 model; model files and revisions continue to be verified offline.
 
