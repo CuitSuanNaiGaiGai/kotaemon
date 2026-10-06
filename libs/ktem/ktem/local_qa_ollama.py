@@ -13,6 +13,7 @@ from numbers import Real
 from typing import Any
 
 from ktem.local_qa_core import EvidenceCard, render_generation_context
+from ktem.local_qa_defaults import DEFAULT_LOCAL_MODEL
 
 from kotaemon.indices.knowledge.retrieval.context_budget import (
     GenerationBudget,
@@ -111,7 +112,7 @@ class OllamaLocalClient:
     def __init__(
         self,
         endpoint: str = "http://127.0.0.1:11434",
-        model: str = "qwen2.5:7b",
+        model: str = DEFAULT_LOCAL_MODEL,
         *,
         timeout: float = 120.0,
         model_context: int = 32768,

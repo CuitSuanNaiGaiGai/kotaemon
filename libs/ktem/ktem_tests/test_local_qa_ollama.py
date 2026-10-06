@@ -147,6 +147,12 @@ def card(
     )
 
 
+def test_default_local_model_is_qwen_3b():
+    client = OllamaLocalClient(count_tokens=len)
+
+    assert client.model == "qwen2.5:3b"
+
+
 def assert_adaptive_answer_instructions(system_prompt):
     normalized_prompt = " ".join(system_prompt.casefold().split())
     assert "answer directly" in normalized_prompt

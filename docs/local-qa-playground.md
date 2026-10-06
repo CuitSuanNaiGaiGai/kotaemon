@@ -11,14 +11,18 @@ panel labels these limits as chunk seed K=20 and source K=5. If FTS5 or the
 local reranker is unavailable, the UI reports that degraded route and keeps
 the usable retrieval paths.
 
-Each question is handled independently. Before generation, complete evidence
-cards are packed against the configured model budget. A matching cached Qwen
-tokenizer is used when present; otherwise the client counts UTF-8 bytes and
-labels the budget estimated. If no seed card fits, generation is skipped. The
-client also checks the final rendered system and user messages against the
-budget before sending them. Route status, fusion IDs, reranking, expansion,
-packing, and omitted-card diagnostics appear with the evidence. The answer
-panel cites only cards in that final packed context.
+The workbench keeps bounded user-question history in session memory: at most
+three recent turns and 1,024 counted tokens. Retrieval and answer generation can
+use this history; assistant answers and evidence are not added to it. The
+optional “Resolve follow-ups with recent user turns” control asks the local
+Ollama model to rewrite a follow-up query. Clear resets the history. Before
+generation, complete evidence cards are packed against the configured model
+budget. A matching cached Qwen tokenizer is used when present; otherwise the
+client counts UTF-8 bytes and labels the budget estimated. If no seed card fits,
+generation is skipped. The client also checks the final rendered system and
+user messages against the budget before sending them. Route status, fusion IDs,
+reranking, expansion, packing, and omitted-card diagnostics appear with the
+evidence. The answer panel cites only cards in that final packed context.
 
 ## Prerequisites
 
@@ -28,7 +32,7 @@ panel cites only cards in that final packed context.
   model before asking questions:
 
   ```bash
-  ollama pull qwen2.5:7b
+  ollama pull qwen2.5:3b
   ```
 
 The UI reports the snapshot version and configured generation model when it
@@ -46,23 +50,27 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run --package ktem python -m ktem.loc
   --snapshot /path/to/git-ignored/local-root/snapshots/v2 \
   --embedding-model-dir /path/to/git-ignored/local-root/models/bge-m3 \
   --reranker-model-dir /path/to/git-ignored/local-root/models/bge-reranker \
-  --ollama-endpoint http://127.0.0.1:11434 --model qwen2.5:7b \
+  --ollama-endpoint http://127.0.0.1:11434 --model qwen2.5:3b \
   --server-port 7860
 ```
 
-The question field is independent for every Ask action. The evidence panel
-shows source rank, candidate chunk rank, relative source label, locator, score,
-and the exact retrieved chunk text. Clear removes the question, answer, and
-evidence from the page.
+Enter the current question for each Ask action. The evidence panel shows source
+rank, candidate chunk rank, relative source label, locator, score, and the exact
+retrieved chunk text. Clear removes the question, answer, evidence, and
+session-local user-question history from the page.
 
-Only when an Ask action has a non-empty question and at least one seed fits the
-budget are the original question and exactly the packed evidence cards sent over
-the loopback HTTP interface to the local Ollama process. Streaming and
-non-streaming requests use the same packed cards. Empty questions, searches
-without evidence, and requests where no seed fits skip generation. Generation
-failures display an error instead of a generated answer. The workbench does not
-write questions, answers, evidence, or traces to the snapshot or its own files.
-It does not control Ollama's process-memory or retention behavior.
+When follow-up resolution is enabled and a recognized follow-up has recent user
+turns, the current question and bounded history may be sent to the local Ollama
+process for query rewriting before retrieval, even if no evidence is found.
+Answer generation runs only for a non-empty question when at least one seed fits
+the budget; it sends the current question, bounded user-question history, and
+exactly the packed evidence cards over the loopback HTTP interface. Streaming
+and non-streaming requests use the same packed cards. Empty questions, searches
+without evidence, and requests where no seed fits skip answer generation.
+Generation failures display an error instead of a generated answer. The
+workbench does not write questions, answers, evidence, or traces to the snapshot
+or its own files. It does not control Ollama's process-memory or retention
+behavior.
 
 ## Combination, ablation, and conversation evaluation
 

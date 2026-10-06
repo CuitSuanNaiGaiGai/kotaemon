@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import gradio as gr
 import pytest
@@ -378,7 +379,13 @@ def test_ui_wires_ask_and_clear_and_disables_analytics():
     )
 
 
-def test_main_forwards_cli_arguments_and_uses_loopback_launch(monkeypatch):
+@pytest.mark.parametrize(
+    ("model_arguments", "expected_model"),
+    [(["--model", "synthetic:tag"], "synthetic:tag"), ([], "qwen2.5:3b")],
+)
+def test_main_forwards_cli_model_or_defaults_to_qwen_3b(
+    monkeypatch, model_arguments, expected_model
+):
     import ktem.local_qa_playground as playground
 
     expected_paths = (
@@ -430,8 +437,7 @@ def test_main_forwards_cli_arguments_and_uses_loopback_launch(monkeypatch):
             str(expected_paths[3]),
             "--ollama-endpoint",
             "http://127.0.0.1:11435",
-            "--model",
-            "synthetic:tag",
+            *model_arguments,
             "--server-port",
             "7865",
         ]
@@ -439,7 +445,7 @@ def test_main_forwards_cli_arguments_and_uses_loopback_launch(monkeypatch):
 
     assert result == 0
     assert open_calls == [expected_paths]
-    assert generator_calls == [("http://127.0.0.1:11435", "synthetic:tag")]
+    assert generator_calls == [("http://127.0.0.1:11435", expected_model)]
     assert build_calls == [(qa, generator, "v2")]
     assert demo.launch_kwargs == {
         "server_name": "127.0.0.1",
@@ -447,3 +453,34 @@ def test_main_forwards_cli_arguments_and_uses_loopback_launch(monkeypatch):
         "share": False,
         "inbrowser": False,
     }
+
+
+def test_setup_page_defaults_ollama_to_qwen_3b(monkeypatch):
+    import ktem.pages.setup as setup
+
+    class FakeComponent:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    gradio_stub = SimpleNamespace(
+        Markdown=FakeComponent,
+        Radio=FakeComponent,
+        Column=FakeComponent,
+        Textbox=FakeComponent,
+        HTML=FakeComponent,
+        Row=FakeComponent,
+        Button=FakeComponent,
+    )
+    monkeypatch.setattr(setup, "gr", gradio_stub)
+    monkeypatch.setattr(setup, "config", lambda _key, *, default: default)
+
+    page = setup.SetupPage(SimpleNamespace(app_name="Synthetic"))
+
+    assert page.ollama_model_name.kwargs["value"] == "qwen2.5:3b"

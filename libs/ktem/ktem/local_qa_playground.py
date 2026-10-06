@@ -11,6 +11,7 @@ from typing import Any
 
 import gradio as gr
 from ktem.local_qa_core import LocalQA, open_playground
+from ktem.local_qa_defaults import DEFAULT_LOCAL_MODEL
 from ktem.local_qa_conversation import (
     DEFAULT_HISTORY_TOKEN_LIMIT,
     DEFAULT_MAX_TURNS,
@@ -301,7 +302,10 @@ def build_ui(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Ask independent questions over an approved local snapshot."
+        description=(
+            "Ask questions over an approved local snapshot with bounded "
+            "session history."
+        )
     )
     parser.add_argument("--local-root", type=Path, required=True)
     parser.add_argument("--snapshot", type=Path, required=True)
@@ -311,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--ollama-endpoint",
         default="http://127.0.0.1:11434",
     )
-    parser.add_argument("--model", default="qwen2.5:7b")
+    parser.add_argument("--model", default=DEFAULT_LOCAL_MODEL)
     parser.add_argument("--server-port", type=int, default=7860)
     args = parser.parse_args(argv)
 
