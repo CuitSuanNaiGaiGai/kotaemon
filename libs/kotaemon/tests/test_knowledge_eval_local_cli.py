@@ -122,6 +122,7 @@ def _write_model_manifest(
 def test_cli_exposes_the_local_evaluation_commands():
     assert set(local_cli.main.commands) == {
         "combination-experiment",
+        "supplemental-baseline",
         "resume-combination-experiment",
         "repack-combination-experiment",
         "inventory",
@@ -164,6 +165,20 @@ def test_combination_experiment_help_exposes_versioned_inputs():
         "--source-staging-dir",
     ):
         assert flag in repack_help.output
+
+    supplemental_help = CliRunner().invoke(
+        local_cli.main, ["supplemental-baseline", "--help"]
+    )
+    assert supplemental_help.exit_code == 0, supplemental_help.output
+    for flag in (
+        "--local-root",
+        "--snapshot",
+        "--embedding-model-dir",
+        "--reranker-model-dir",
+        "--reference-artifact-dir",
+        "--artifact-dir",
+    ):
+        assert flag in supplemental_help.output
 
 
 def test_combination_experiment_rejects_snapshot_outside_local_root(tmp_path):

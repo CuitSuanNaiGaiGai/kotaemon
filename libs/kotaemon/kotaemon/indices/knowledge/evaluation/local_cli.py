@@ -42,6 +42,7 @@ from .local_models import (
     _validate_and_hash_model_dir,
 )
 from .local_snapshot import load_local_snapshot
+from .supplemental_baseline import run_supplemental_baseline
 
 
 MODEL_MANIFEST_NAME = "model-manifest.json"
@@ -1669,6 +1670,66 @@ def _combination_experiment(
     click.echo(f"Local combination artifacts written under {destination}")
 
 
+def _supplemental_baseline_experiment(
+    *,
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    reference_artifact_dir: Path,
+    artifact_dir: Path,
+) -> None:
+    try:
+        root = _local_root(local_root)
+        snapshots_root = _category_dir(root, "snapshots")
+        snapshot_path = _ensure_contained(Path(snapshot), snapshots_root, "snapshot")
+        _reject_symlink_components(snapshot_path, stop=snapshots_root)
+        if not snapshot_path.is_dir():
+            raise ValueError("snapshot must be a directory beneath local/snapshots/")
+        reviewed_snapshot = load_local_snapshot(snapshot_path)
+        _validate_snapshot_approval(snapshot_path)
+        _model_paths, manifest_bytes = _resolve_model_paths_with_manifest(
+            root,
+            embedding_model_dir,
+            reranker_model_dir,
+        )
+
+        runs_root = _category_dir(root, "runs")
+        supplied_reference = Path(reference_artifact_dir).expanduser()
+        if not supplied_reference.is_absolute():
+            supplied_reference = Path.cwd() / supplied_reference
+        reference_path = _ensure_contained(
+            supplied_reference, runs_root, "reference run"
+        )
+        _reject_symlink_components(reference_path, stop=runs_root)
+        if not reference_path.is_dir():
+            raise ValueError("reference run must be a directory beneath local/runs/")
+        reference_report = _decode_json(
+            _read_regular_file(reference_path / "report.json", "reference report"),
+            "reference report",
+        )
+
+        supplied_output = Path(artifact_dir).expanduser()
+        if not supplied_output.is_absolute():
+            supplied_output = Path.cwd() / supplied_output
+        destination = _ensure_contained(supplied_output, runs_root, "artifact output")
+        _reject_symlink_components(destination, stop=runs_root)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(
+                f"Supplemental baseline destination already exists: {destination}"
+            )
+        run_supplemental_baseline(
+            reviewed_snapshot,
+            reference_report=reference_report,
+            reference_artifact_dir=reference_path,
+            verified_model_manifest_sha256=_sha256(manifest_bytes),
+            artifact_dir=destination,
+        )
+    except (OSError, ValueError, RuntimeError, ImportError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"Supplemental baseline artifacts written under {destination}")
+
+
 @main.command("combination-experiment")
 @click.option(
     "--local-root",
@@ -1724,6 +1785,62 @@ def combination_experiment_command(
         conversation_fixture=conversation_fixture,
         staging_dir=None,
         resume=False,
+    )
+
+
+@main.command("supplemental-baseline")
+@click.option(
+    "--local-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Selected ignored local/ root for snapshots, models, and runs.",
+)
+@click.option(
+    "--snapshot",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Approved snapshot beneath local/snapshots/.",
+)
+@click.option(
+    "--embedding-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Local BAAI/bge-m3 directory verified by the local model manifest.",
+)
+@click.option(
+    "--reranker-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Local BAAI/bge-reranker-v2-m3 directory verified by the local model manifest.",
+)
+@click.option(
+    "--reference-artifact-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Completed v3 combination run beneath local/runs/.",
+)
+@click.option(
+    "--artifact-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="New supplemental output destination beneath local/runs/.",
+)
+def supplemental_baseline_command(
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    reference_artifact_dir: Path,
+    artifact_dir: Path,
+) -> None:
+    """Replay the lexical-first hybrid baseline against frozen v3 vector results."""
+    _supplemental_baseline_experiment(
+        local_root=local_root,
+        snapshot=snapshot,
+        embedding_model_dir=embedding_model_dir,
+        reranker_model_dir=reranker_model_dir,
+        reference_artifact_dir=reference_artifact_dir,
+        artifact_dir=artifact_dir,
     )
 
 
