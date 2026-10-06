@@ -14,7 +14,10 @@ from typing import Any
 
 from ktem.local_qa_core import EvidenceCard, render_generation_context
 
-from kotaemon.indices.knowledge.retrieval.context_budget import GenerationBudget
+from kotaemon.indices.knowledge.retrieval.context_budget import (
+    GenerationBudget,
+    serialize_chat_messages,
+)
 
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_STREAM_LINE_BYTES = 256 * 1024
@@ -241,12 +244,7 @@ class OllamaLocalClient:
                     {"role": "user", "content": prompt},
                 ],
             }
-            rendered_messages = json.dumps(
-                payload["messages"],
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            )
+            rendered_messages = serialize_chat_messages(payload["messages"])
             message_tokens = self.count_tokens(rendered_messages)
             if (
                 isinstance(message_tokens, bool)

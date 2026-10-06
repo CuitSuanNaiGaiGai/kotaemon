@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -9,6 +10,16 @@ from typing import Literal
 from kotaemon.base import RetrievedDocument
 
 from .expansion import EvidenceBundle
+
+
+def serialize_chat_messages(messages: Sequence[dict]) -> str:
+    """Serialize role/content messages in the canonical compact request form."""
+    return json.dumps(
+        list(messages),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
 
 
 def _require_integer(name: str, value: int, *, minimum: int) -> None:
@@ -43,6 +54,8 @@ class PackedContext:
     status: Literal["ready", "insufficient_evidence"]
     omitted_ids: tuple[str, ...]
     omission_reasons: tuple[dict, ...] = ()
+    request_token_count: int | None = None
+    request_tokens_available: int | None = None
 
 
 def _count_tokens(count_tokens: Callable[[str], int], text: str) -> int:
@@ -69,6 +82,7 @@ def pack_evidence(
     count_tokens: Callable[[str], int],
     base_prompt: str,
     render_context: Callable[[Sequence[RetrievedDocument]], str],
+    render_budgeted_request: Callable[[str], str] | None = None,
 ) -> PackedContext:
     """Pack complete rendered units, considering every seed before any neighbor."""
     if not isinstance(bundle, EvidenceBundle):
@@ -81,6 +95,8 @@ def pack_evidence(
         raise TypeError("base_prompt must be a string")
     if not callable(render_context):
         raise TypeError("render_context must be callable")
+    if render_budgeted_request is not None and not callable(render_budgeted_request):
+        raise TypeError("render_budgeted_request must be callable")
 
     prompt_tokens = _count_tokens(count_tokens, base_prompt)
     available_tokens = (
@@ -91,6 +107,26 @@ def pack_evidence(
     )
     if available_tokens < 0:
         raise ValueError("base prompt and reserves exceed model_context")
+    request_tokens_available = budget.model_context - (
+        budget.output_reserve + budget.format_reserve
+    )
+
+    def request_token_count(rendered_context: str) -> int | None:
+        if render_budgeted_request is None:
+            return None
+        rendered_request = render_budgeted_request(rendered_context)
+        if not isinstance(rendered_request, str):
+            raise TypeError("render_budgeted_request must return a string")
+        return _count_tokens(count_tokens, rendered_request)
+
+    def fits_budget(rendered_context: str, context_tokens: int) -> bool:
+        if context_tokens > available_tokens:
+            return False
+        request_tokens = request_token_count(rendered_context)
+        return (
+            request_tokens is None
+            or request_tokens <= request_tokens_available
+        )
 
     included: list[RetrievedDocument] = []
     included_seed_ids: set[str] = set()
@@ -118,7 +154,7 @@ def pack_evidence(
         if not isinstance(rendered, str):
             raise TypeError("render_context must return a string")
         candidate_tokens = _count_tokens(count_tokens, rendered)
-        if candidate_tokens > available_tokens:
+        if not fits_budget(rendered, candidate_tokens):
             omit(document, "rendered_unit_exceeds_available_tokens")
             return
 
@@ -137,7 +173,11 @@ def pack_evidence(
         if not isinstance(empty_rendered, str):
             raise TypeError("render_context must return a string")
         empty_token_count = _count_tokens(count_tokens, empty_rendered)
-        if empty_token_count > available_tokens:
+        empty_request_tokens = request_token_count(empty_rendered)
+        if empty_token_count > available_tokens or (
+            empty_request_tokens is not None
+            and empty_request_tokens > request_tokens_available
+        ):
             raise ValueError(
                 "empty rendered evidence exceeds the available token budget"
             )
@@ -148,6 +188,12 @@ def pack_evidence(
             status="insufficient_evidence",
             omitted_ids=tuple(omitted_ids),
             omission_reasons=tuple(omission_reasons),
+            request_token_count=empty_request_tokens,
+            request_tokens_available=(
+                request_tokens_available
+                if render_budgeted_request is not None
+                else None
+            ),
         )
 
     for neighbor in bundle.expansions:
@@ -157,7 +203,11 @@ def pack_evidence(
     if not isinstance(final_rendered, str):
         raise TypeError("render_context must return a string")
     final_token_count = _count_tokens(count_tokens, final_rendered)
-    if final_token_count > available_tokens:
+    final_request_tokens = request_token_count(final_rendered)
+    if final_token_count > available_tokens or (
+        final_request_tokens is not None
+        and final_request_tokens > request_tokens_available
+    ):
         raise ValueError("final rendered evidence exceeds the available token budget")
 
     return PackedContext(
@@ -167,4 +217,8 @@ def pack_evidence(
         status="ready",
         omitted_ids=tuple(omitted_ids),
         omission_reasons=tuple(omission_reasons),
+        request_token_count=final_request_tokens,
+        request_tokens_available=(
+            request_tokens_available if render_budgeted_request is not None else None
+        ),
     )

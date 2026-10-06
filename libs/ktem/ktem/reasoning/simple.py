@@ -26,6 +26,7 @@ from kotaemon.base import (
 from kotaemon.indices.knowledge.retrieval.context_budget import (
     GenerationBudget,
     pack_evidence,
+    serialize_chat_messages,
 )
 from kotaemon.indices.knowledge.retrieval.expansion import EvidenceBundle
 from kotaemon.indices.knowledge.retrieval.trace import trace_event, trace_scoped
@@ -35,10 +36,7 @@ from kotaemon.indices.qa.citation_qa import (
     AnswerWithContextPipeline,
 )
 from kotaemon.indices.qa.citation_qa_inline import AnswerWithInlineCitation
-from kotaemon.indices.qa.format_context import (
-    PrepareEvidencePipeline,
-    format_evidence_unit,
-)
+from kotaemon.indices.qa.format_context import PrepareEvidencePipeline
 from kotaemon.indices.qa.utils import replace_think_tag_with_details
 from kotaemon.llms import ChatLLM
 
@@ -111,6 +109,8 @@ class FullQAPipeline(BaseReasoning):
 
     evidence_pipeline: PrepareEvidencePipeline = PrepareEvidencePipeline.withx()
     answering_pipeline: AnswerWithContextPipeline
+    output_reserve: int = 2048
+    format_reserve: int = 256
     rewrite_pipeline: RewriteQuestionPipeline | None = None
     create_citation_viz_pipeline: CreateCitationVizPipeline = Node(
         default_callback=lambda _: CreateCitationVizPipeline(
@@ -222,7 +222,7 @@ class FullQAPipeline(BaseReasoning):
 
         return docs, info
 
-    def _pack_authorized_v3_evidence(self, docs, trace):
+    def _pack_authorized_v3_evidence(self, docs, trace, *, question, history):
         """Pack expansion-enabled product evidence before answer generation."""
         seeds = tuple(
             document
@@ -236,17 +236,34 @@ class FullQAPipeline(BaseReasoning):
         )
         budget = GenerationBudget(
             model_context=self.evidence_pipeline._budget(),
-            output_reserve=0,
-            format_reserve=0,
+            output_reserve=self.output_reserve,
+            format_reserve=self.format_reserve,
         )
+
+        def render_request(documents):
+            evidence_mode, evidence, images = self.evidence_pipeline(
+                list(documents)
+            ).content
+            messages, _prompt, _evidence = (
+                self.answering_pipeline.prepare_generation_messages(
+                    question,
+                    evidence,
+                    evidence_mode,
+                    images=images,
+                    history=history,
+                )
+            )
+            return serialize_chat_messages(
+                [message.to_openai_format() for message in messages]
+            )
+
         packed = pack_evidence(
             EvidenceBundle(seeds=seeds, expansions=expansions, decisions=()),
             budget=budget,
             count_tokens=self.evidence_pipeline._counter(),
             base_prompt="",
-            render_context=lambda documents: "".join(
-                format_evidence_unit(document)[1] for document in documents
-            ),
+            render_context=render_request,
+            render_budgeted_request=lambda serialized_messages: serialized_messages,
         )
         trace_event(
             trace,
@@ -398,7 +415,9 @@ class FullQAPipeline(BaseReasoning):
         )
         packed_status = None
         if expansion_enabled:
-            docs, packed_context = self._pack_authorized_v3_evidence(docs, trace)
+            docs, packed_context = self._pack_authorized_v3_evidence(
+                docs, trace, question=message, history=history
+            )
             packed_status = packed_context.status
             infos = [
                 Document(

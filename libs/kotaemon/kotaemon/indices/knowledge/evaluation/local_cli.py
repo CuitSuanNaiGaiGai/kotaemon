@@ -28,6 +28,10 @@ import click
 from .local_corpus import scan_sources
 from .local_ingest import build_local_draft
 from .local_experiment import run_local_experiment
+from .combination_eval import (
+    repack_completed_combination_experiment,
+    run_combination_experiment,
+)
 from .local_models import (
     EMBEDDING_MODEL_ID,
     RERANKER_MODEL_ID,
@@ -1429,8 +1433,6 @@ def download_models_command(local_root: Path) -> None:
 def _attach_verified_model_manifest(artifact_dir: Path, manifest_bytes: bytes) -> None:
     """Add the verified provenance manifest and bind it into the run sidecar."""
     manifest_path = artifact_dir / MODEL_MANIFEST_NAME
-    if manifest_path.exists() or manifest_path.is_symlink():
-        raise ValueError("run output already contains a model-manifest.json")
     sidecar_path = artifact_dir / "artifact-manifest.json"
     sidecar = _decode_json(
         _read_regular_file(sidecar_path, "run artifact-manifest.json"),
@@ -1442,18 +1444,29 @@ def _attach_verified_model_manifest(artifact_dir: Path, manifest_bytes: bytes) -
         or any(not isinstance(entry, dict) for entry in sidecar["artifacts"])
     ):
         raise ValueError("run artifact-manifest.json has an invalid schema")
-    if any(entry.get("path") == MODEL_MANIFEST_NAME for entry in sidecar["artifacts"]):
-        raise ValueError("run artifact-manifest.json already lists model-manifest.json")
+    manifest_entries = [
+        entry
+        for entry in sidecar["artifacts"]
+        if entry.get("path") == MODEL_MANIFEST_NAME
+    ]
+    expected_entry = {
+        "path": MODEL_MANIFEST_NAME,
+        "sha256": _sha256(manifest_bytes),
+        "size_bytes": len(manifest_bytes),
+        "kind": "verified_model_manifest",
+    }
+    if manifest_path.exists() or manifest_path.is_symlink():
+        if _read_regular_file(manifest_path, "run model manifest") != manifest_bytes:
+            raise ValueError("run output model manifest does not match verified input")
+        if manifest_entries == [expected_entry]:
+            return
+        if manifest_entries:
+            raise ValueError("run artifact-manifest.json has a conflicting model manifest")
+    elif manifest_entries:
+        raise ValueError("run artifact-manifest.json lists a missing model manifest")
 
     _atomic_write(manifest_path, manifest_bytes)
-    sidecar["artifacts"].append(
-        {
-            "path": MODEL_MANIFEST_NAME,
-            "sha256": _sha256(manifest_bytes),
-            "size_bytes": len(manifest_bytes),
-            "kind": "verified_model_manifest",
-        }
-    )
+    sidecar["artifacts"].append(expected_entry)
     _atomic_write(sidecar_path, _canonical_json(sidecar))
 
 
@@ -1557,6 +1570,341 @@ def run_command(
     except (OSError, ValueError, RuntimeError, ImportError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(f"Local experiment artifacts written under {artifact_dir}")
+
+
+def _combination_experiment(
+    *,
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    artifact_dir: Path,
+    conversation_fixture: Path | None,
+    staging_dir: Path | None,
+    resume: bool,
+) -> None:
+    try:
+        root = _local_root(local_root)
+        snapshots_root = _category_dir(root, "snapshots")
+        snapshot_path = _ensure_contained(Path(snapshot), snapshots_root, "snapshot")
+        _reject_symlink_components(snapshot_path, stop=snapshots_root)
+        if not snapshot_path.is_dir():
+            raise ValueError("snapshot must be a directory beneath local/snapshots/")
+        try:
+            reviewed_snapshot = load_local_snapshot(snapshot_path)
+        except ValueError as error:
+            if "review_status='approved'" in str(error):
+                raise ValueError(
+                    "combination-experiment requires an approved snapshot"
+                ) from error
+            raise
+        _validate_snapshot_approval(snapshot_path)
+        model_paths, manifest_bytes = _resolve_model_paths_with_manifest(
+            root,
+            embedding_model_dir,
+            reranker_model_dir,
+        )
+        _require_offline_inference_process()
+
+        fixture_path = None
+        if conversation_fixture is not None:
+            fixture_path = _ensure_contained(
+                Path(conversation_fixture), root, "conversation fixture"
+            )
+            _reject_symlink_components(fixture_path, stop=root)
+            if not fixture_path.is_file():
+                raise ValueError(
+                    "conversation fixture must be a regular file beneath local-root"
+                )
+
+        runs_root = _category_dir(root, "runs")
+        supplied_artifact = Path(artifact_dir).expanduser()
+        if not supplied_artifact.is_absolute():
+            supplied_artifact = Path.cwd() / supplied_artifact
+        destination = _ensure_contained(
+            supplied_artifact, runs_root, "combination artifact output"
+        )
+        _reject_symlink_components(destination, stop=runs_root)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(
+                f"Combination artifact destination already exists: {destination}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _reject_symlink_components(destination, stop=runs_root)
+        if resume:
+            if staging_dir is None:
+                raise ValueError("Resume requires a staging directory")
+            supplied_staging = Path(staging_dir).expanduser()
+            if not supplied_staging.is_absolute():
+                supplied_staging = Path.cwd() / supplied_staging
+            selected_staging = _ensure_contained(
+                supplied_staging, runs_root, "combination staging directory"
+            )
+            _reject_symlink_components(selected_staging, stop=runs_root)
+            if not selected_staging.is_dir():
+                raise ValueError("combination staging directory does not exist")
+            if not selected_staging.name.startswith(
+                f".{destination.name}.staging-"
+            ):
+                raise ValueError("combination staging directory name does not match output")
+        else:
+            if staging_dir is not None:
+                raise ValueError("Fresh combination runs cannot select a staging directory")
+            selected_staging = destination.parent / (
+                f".{destination.name}.staging-{uuid.uuid4().hex}"
+            )
+        click.echo(f"Combination staging directory: {selected_staging}")
+        run_combination_experiment(
+            reviewed_snapshot,
+            model_paths=model_paths,
+            artifact_dir=destination,
+            conversation_fixture=fixture_path,
+            staging_dir=selected_staging,
+            resume=resume,
+            verified_model_manifest_bytes=manifest_bytes,
+        )
+        _attach_verified_model_manifest(destination, manifest_bytes)
+    except (OSError, ValueError, RuntimeError, ImportError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"Local combination artifacts written under {destination}")
+
+
+@main.command("combination-experiment")
+@click.option(
+    "--local-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Selected ignored local/ root for snapshots, models, fixtures, and runs.",
+)
+@click.option(
+    "--snapshot",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Approved snapshot beneath local/snapshots/.",
+)
+@click.option(
+    "--embedding-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Local BAAI/bge-m3 directory verified by local/models/model-manifest.json.",
+)
+@click.option(
+    "--reranker-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Local BAAI/bge-reranker-v2-m3 directory verified by the model manifest.",
+)
+@click.option(
+    "--artifact-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="New artifact destination beneath local/runs/; existing paths are rejected.",
+)
+@click.option(
+    "--conversation-fixture",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Optional separately reviewed conversation fixture beneath local/.",
+)
+def combination_experiment_command(
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    artifact_dir: Path,
+    conversation_fixture: Path | None,
+) -> None:
+    """Run the fixed local combination, ablation, and conversation evaluations."""
+    _combination_experiment(
+        local_root=local_root,
+        snapshot=snapshot,
+        embedding_model_dir=embedding_model_dir,
+        reranker_model_dir=reranker_model_dir,
+        artifact_dir=artifact_dir,
+        conversation_fixture=conversation_fixture,
+        staging_dir=None,
+        resume=False,
+    )
+
+
+@main.command("resume-combination-experiment")
+@click.option(
+    "--local-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Selected ignored local/ root for snapshots, models, fixtures, and runs.",
+)
+@click.option(
+    "--snapshot",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="The same approved snapshot used to start the run.",
+)
+@click.option(
+    "--embedding-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Local BAAI/bge-m3 directory verified by local/models/model-manifest.json.",
+)
+@click.option(
+    "--reranker-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Local BAAI/bge-reranker-v2-m3 directory verified by the model manifest.",
+)
+@click.option(
+    "--artifact-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Final artifact destination beneath local/runs/; existing paths are rejected.",
+)
+@click.option(
+    "--staging-dir",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    required=True,
+    help="Exact hidden staging directory printed when the original run started.",
+)
+@click.option(
+    "--conversation-fixture",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="The same optional reviewed conversation fixture used to start the run.",
+)
+def resume_combination_experiment_command(
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    artifact_dir: Path,
+    staging_dir: Path,
+    conversation_fixture: Path | None,
+) -> None:
+    """Resume a combination run only when its checkpoint inputs still match."""
+    _combination_experiment(
+        local_root=local_root,
+        snapshot=snapshot,
+        embedding_model_dir=embedding_model_dir,
+        reranker_model_dir=reranker_model_dir,
+        artifact_dir=artifact_dir,
+        conversation_fixture=conversation_fixture,
+        staging_dir=staging_dir,
+        resume=True,
+    )
+
+
+def _repack_combination_experiment(
+    *,
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    source_staging_dir: Path,
+    artifact_dir: Path,
+) -> None:
+    try:
+        root = _local_root(local_root)
+        snapshots_root = _category_dir(root, "snapshots")
+        snapshot_path = _ensure_contained(Path(snapshot), snapshots_root, "snapshot")
+        _reject_symlink_components(snapshot_path, stop=snapshots_root)
+        if not snapshot_path.is_dir():
+            raise ValueError("snapshot must be a directory beneath local/snapshots/")
+        reviewed_snapshot = load_local_snapshot(snapshot_path)
+        _validate_snapshot_approval(snapshot_path)
+        model_paths, manifest_bytes = _resolve_model_paths_with_manifest(
+            root,
+            embedding_model_dir,
+            reranker_model_dir,
+        )
+        _require_offline_inference_process()
+
+        runs_root = _category_dir(root, "runs")
+        source = _ensure_contained(
+            Path(source_staging_dir), runs_root, "repack source staging directory"
+        )
+        _reject_symlink_components(source, stop=runs_root)
+        if not source.is_dir():
+            raise ValueError("repack source must be a staging directory beneath local/runs/")
+        supplied_artifact = Path(artifact_dir).expanduser()
+        if not supplied_artifact.is_absolute():
+            supplied_artifact = Path.cwd() / supplied_artifact
+        destination = _ensure_contained(
+            supplied_artifact, runs_root, "combination repack output"
+        )
+        _reject_symlink_components(destination, stop=runs_root)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(
+                f"Combination repack destination already exists: {destination}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _reject_symlink_components(destination, stop=runs_root)
+        click.echo(f"Combination repack source: {source}")
+        repack_completed_combination_experiment(
+            reviewed_snapshot,
+            model_paths=model_paths,
+            source_staging_dir=source,
+            artifact_dir=destination,
+            verified_model_manifest_bytes=manifest_bytes,
+        )
+        _attach_verified_model_manifest(destination, manifest_bytes)
+    except (OSError, ValueError, RuntimeError, ImportError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"Local combination artifacts written under {destination}")
+
+
+@main.command("repack-combination-experiment")
+@click.option(
+    "--local-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Selected ignored local/ root for snapshots, models, fixtures, and runs.",
+)
+@click.option(
+    "--snapshot",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="The approved snapshot used by the source run.",
+)
+@click.option(
+    "--embedding-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="The locally verified BAAI/bge-m3 directory used by the source run.",
+)
+@click.option(
+    "--reranker-model-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="The locally verified reranker directory used by the source run.",
+)
+@click.option(
+    "--source-staging-dir",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    required=True,
+    help="Complete hidden checkpointed run whose fingerprints and trace hashes will be verified.",
+)
+@click.option(
+    "--artifact-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="New artifact destination beneath local/runs/.",
+)
+def repack_combination_experiment_command(
+    local_root: Path,
+    snapshot: Path,
+    embedding_model_dir: Path,
+    reranker_model_dir: Path,
+    source_staging_dir: Path,
+    artifact_dir: Path,
+) -> None:
+    """Repack authenticated retrieval traces with the current budget policy."""
+    _repack_combination_experiment(
+        local_root=local_root,
+        snapshot=snapshot,
+        embedding_model_dir=embedding_model_dir,
+        reranker_model_dir=reranker_model_dir,
+        source_staging_dir=source_staging_dir,
+        artifact_dir=artifact_dir,
+    )
 
 
 if __name__ == "__main__":

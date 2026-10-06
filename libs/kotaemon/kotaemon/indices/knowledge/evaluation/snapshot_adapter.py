@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Sequence
 
 from kotaemon.base import Document
@@ -17,6 +18,7 @@ from kotaemon.indices.knowledge.runtime.index import (
     KnowledgeRuntime,
     build_knowledge_runtime,
 )
+from kotaemon.indices.knowledge.retrieval.knowledge_service import KnowledgeService
 from kotaemon.indices.rankings import BaseReranking
 from kotaemon.indices.splitters import TokenSplitter
 
@@ -113,6 +115,28 @@ class SnapshotRuntime(KnowledgeRuntime):
     draft_chunks: Mapping[str, DraftChunk] = field(default_factory=dict)
     unresolved_offsets: Mapping[str, UnresolvedChunkOffsets] = field(
         default_factory=dict
+    )
+
+
+def _snapshot_catalog(
+    snapshot: LocalSnapshot,
+    chunk_map: Mapping[str, Sequence[str]],
+    chunk_to_source: Mapping[str, str],
+) -> SnapshotCatalog:
+    return SnapshotCatalog(
+        [
+            KnowledgeSource(
+                source_id=source["source_id"],
+                source_type=infer_source_type({}, "source" + source["suffix"]),
+                virtual_path="/",
+                entity={},
+                document_name=source["relative_path"].rsplit("/", 1)[-1],
+                source_name=source["relative_path"],
+            )
+            for source in snapshot.selected_sources
+        ],
+        chunk_map,
+        chunk_to_source,
     )
 
 
@@ -346,6 +370,75 @@ def build_snapshot_runtime(
         embedding=runtime.embedding,
         policy=runtime.policy,
         config=runtime.config,
+        chunk_to_source=chunk_to_source,
+        source_labels={
+            source_id: source["relative_path"]
+            for source_id, source in sources_by_id.items()
+        },
+        locators=locators,
+        chunk_map=chunk_map,
+        source_types=source_types,
+        draft_chunks=draft_chunks,
+        unresolved_offsets=unresolved_offsets,
+    )
+
+
+def build_snapshot_replay_runtime(
+    snapshot: LocalSnapshot,
+    *,
+    policy: RetrievalPolicy,
+    chunking_mode: Literal["token", "registry"],
+    lexical: bool,
+    lexical_status: str,
+    reranker_available: bool,
+) -> SnapshotRuntime:
+    """Build snapshot metadata for authenticated trace replay without indexing."""
+    (
+        documents,
+        chunk_to_source,
+        chunk_map,
+        source_types,
+        draft_chunks,
+        unresolved_offsets,
+        locators,
+    ) = build_snapshot_documents(snapshot, chunking_mode=chunking_mode)
+    sources_by_id = {
+        source["source_id"]: source for source in snapshot.selected_sources
+    }
+    catalog = _snapshot_catalog(snapshot, chunk_map, chunk_to_source)
+    retriever = SimpleNamespace(
+        rerankers=([object()] if reranker_available else [])
+    )
+    service = KnowledgeService(
+        planner=_GlobalIdentityPlanner(),
+        catalog=catalog,
+        retriever=retriever,
+        docstore=None,
+    )
+    config = {
+        "retrieval_policy": {
+            "enabled": policy.enabled,
+            "candidate_k": policy.candidate_k,
+            "max_fused_candidates": policy.max_fused_candidates,
+            "max_variants": policy.max_variants,
+            "dense_weight": policy.dense_weight,
+            "lexical_weight": policy.lexical_weight,
+            "rrf_k": policy.rrf_k,
+        },
+        "lexical_requested": lexical,
+        "lexical_status": lexical_status,
+        "chunking_mode": chunking_mode,
+        "snapshot_fingerprint": snapshot.fingerprint,
+    }
+    return SnapshotRuntime(
+        service=service,
+        docstore=None,
+        catalog=catalog,
+        documents=tuple(documents),
+        vector_store=None,
+        embedding=None,
+        policy=policy,
+        config=config,
         chunk_to_source=chunk_to_source,
         source_labels={
             source_id: source["relative_path"]

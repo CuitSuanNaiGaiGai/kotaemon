@@ -11,11 +11,13 @@ from types import SimpleNamespace
 import pytest
 from ktem import local_qa_core
 from ktem.local_qa_core import EvidenceCard, LocalQA, open_playground
+from ktem.local_qa_ollama import OllamaLocalClient
 
 from kotaemon.base import Document, DocumentWithEmbedding, RetrievedDocument
 from kotaemon.embeddings import BaseEmbeddings
 from kotaemon.indices.knowledge.evaluation.local_models import LocalModelPaths
 from kotaemon.indices.knowledge.evaluation.local_snapshot import load_local_snapshot
+from kotaemon.indices.knowledge.retrieval.context_budget import GenerationBudget
 
 
 def _json_bytes(value):
@@ -521,6 +523,67 @@ def test_retrieve_projects_first_five_sources_in_candidate_order(fake_qa):
     assert cards[4].score is None
     assert service.queries == [("question", 20)]
     assert all(not Path(card.source_label).is_absolute() for card in cards)
+
+
+def test_local_packer_accounts_for_exact_ollama_messages_and_reserves(fake_qa):
+    qa, _service, _source_ids = fake_qa
+    question = "What does the guide say?"
+    history = ("Earlier question?",)
+    output_reserve = 8
+    format_reserve = 3
+    unbounded_client = OllamaLocalClient(
+        model="synthetic:local",
+        output_reserve=output_reserve,
+        format_reserve=format_reserve,
+        count_tokens=len,
+    )
+    cards = qa.retrieve(question, user_history=history)
+    baseline_body = unbounded_client._request_body(
+        question, cards, stream=False, user_history=history
+    )
+    baseline_messages = json.loads(baseline_body)["messages"]
+    exact_message_tokens = len(
+        json.dumps(
+            baseline_messages,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    )
+    model_context = exact_message_tokens + output_reserve + format_reserve - 1
+    client = OllamaLocalClient(
+        model="synthetic:local",
+        model_context=model_context,
+        output_reserve=output_reserve,
+        format_reserve=format_reserve,
+        count_tokens=len,
+    )
+
+    packed = qa.retrieve_result(
+        question,
+        user_history=history,
+        generation_budget=GenerationBudget(
+            model_context=model_context,
+            output_reserve=output_reserve,
+            format_reserve=format_reserve,
+        ),
+        count_tokens=len,
+        base_prompt=client.base_prompt(question),
+    )
+
+    request_body = client._request_body(
+        question, packed.cards, stream=False, user_history=history
+    )
+    request_messages = json.loads(request_body)["messages"]
+    request_tokens = len(
+        json.dumps(
+            request_messages,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    )
+    assert request_tokens + output_reserve + format_reserve <= model_context
 
 
 def test_retrieve_returns_empty_tuple_without_candidates(fake_qa):

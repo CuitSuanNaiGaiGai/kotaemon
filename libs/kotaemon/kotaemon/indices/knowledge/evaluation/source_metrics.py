@@ -32,6 +32,34 @@ class AnchorCoverage:
     rate: float | None
 
 
+@dataclass(frozen=True)
+class FinalContextAnchorCoverage:
+    """Anchor coverage over exactly the evidence chunks packed for generation."""
+
+    total_anchors: int
+    eligible_anchors: int
+    covered_anchors: int
+    uncovered_anchors: int
+    unresolved_anchors: int
+    context_chunk_count: int
+    rate: float | None
+    covered_anchor_ids: tuple[str, ...]
+    uncovered_anchor_ids: tuple[str, ...]
+    unresolved_anchor_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CandidateRecall:
+    """Micro-averaged relevant-source recall at a declared candidate cutoff."""
+
+    numerator: int
+    denominator: int
+    rate: float | None
+    candidate_k: int
+    query_count: int
+    per_query: Mapping[str, Mapping[str, Any]]
+
+
 def _nonempty_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty string")
@@ -216,4 +244,182 @@ def anchor_coverage(
         covered_anchors=covered_count,
         unmapped_anchor_ids=tuple(unmapped),
         rate=None if total == 0 else covered_count / total,
+    )
+
+
+def final_context_anchor_coverage(
+    anchors: Sequence[EvidenceAnchor],
+    *,
+    context_chunk_ids: Sequence[str],
+    chunks_by_id: Mapping[str, DraftChunk],
+    unresolved_offsets: Mapping[str, Any],
+) -> FinalContextAnchorCoverage:
+    """Measure anchor coverage only against chunks in the final packed payload.
+
+    ``unresolved_offsets`` entries may be ``UnresolvedChunkOffsets`` objects or
+    mappings with ``source_id``, ``unit_id``, ``locator``, and ``candidate_spans``.
+    An anchor whose location cannot be resolved is reported separately and
+    excluded from the coverage denominator.
+    """
+    anchor_items = _validate_sequence(anchors, "anchors")
+    context_items = _validate_sequence(context_chunk_ids, "context_chunk_ids")
+    if not isinstance(chunks_by_id, Mapping):
+        raise ValueError("chunks_by_id must be a mapping")
+    if not isinstance(unresolved_offsets, Mapping):
+        raise ValueError("unresolved_offsets must be a mapping")
+    normalized_ids = tuple(
+        _nonempty_string(value, "context chunk ID") for value in context_items
+    )
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise ValueError("context_chunk_ids contains duplicate IDs")
+    missing = set(normalized_ids) - set(chunks_by_id) - set(unresolved_offsets)
+    if missing:
+        raise ValueError(
+            "Final context contains chunk IDs without reviewed anchor metadata: "
+            f"{sorted(missing)}"
+        )
+
+    known_chunks = tuple(
+        chunks_by_id[chunk_id]
+        for chunk_id in normalized_ids
+        if chunk_id in chunks_by_id
+    )
+    known_coverage = anchor_coverage(anchor_items, known_chunks)
+    uncovered_candidates = set(known_coverage.unmapped_anchor_ids)
+    unresolved_ids: set[str] = set()
+    anchors_by_id = {anchor.id: anchor for anchor in anchor_items}
+    for anchor_id in uncovered_candidates:
+        anchor = anchors_by_id[anchor_id]
+        for chunk_id in normalized_ids:
+            value = unresolved_offsets.get(chunk_id)
+            if value is None:
+                continue
+            if isinstance(value, Mapping):
+                source_id = value.get("source_id")
+                unit_id = value.get("unit_id")
+                locator = value.get("locator")
+                spans = value.get("candidate_spans", ())
+            else:
+                source_id = getattr(value, "source_id", None)
+                unit_id = getattr(value, "unit_id", None)
+                locator = getattr(value, "locator", None)
+                spans = getattr(value, "candidate_spans", ())
+            if (
+                source_id != anchor.source_id
+                or unit_id != anchor.unit_id
+                or locator != anchor.locator
+            ):
+                continue
+            if not isinstance(spans, Sequence) or isinstance(spans, (str, bytes)):
+                raise ValueError("candidate_spans must be a sequence of spans")
+            if not spans or any(
+                isinstance(span, Sequence)
+                and not isinstance(span, (str, bytes))
+                and len(span) == 2
+                and isinstance(span[0], int)
+                and isinstance(span[1], int)
+                and span[0] <= anchor.char_start < anchor.char_end <= span[1]
+                for span in spans
+            ):
+                unresolved_ids.add(anchor_id)
+                break
+
+    covered_ids = tuple(
+        anchor.id for anchor in anchor_items if anchor.id not in uncovered_candidates
+    )
+    unresolved_anchor_ids = tuple(
+        anchor.id for anchor in anchor_items if anchor.id in unresolved_ids
+    )
+    uncovered_ids = tuple(
+        anchor.id
+        for anchor in anchor_items
+        if anchor.id in uncovered_candidates and anchor.id not in unresolved_ids
+    )
+    covered_count = len(covered_ids)
+    uncovered_count = len(uncovered_ids)
+    eligible_count = covered_count + uncovered_count
+    return FinalContextAnchorCoverage(
+        total_anchors=len(anchor_items),
+        eligible_anchors=eligible_count,
+        covered_anchors=covered_count,
+        uncovered_anchors=uncovered_count,
+        unresolved_anchors=len(unresolved_anchor_ids),
+        context_chunk_count=len(normalized_ids),
+        rate=(None if eligible_count == 0 else covered_count / eligible_count),
+        covered_anchor_ids=covered_ids,
+        uncovered_anchor_ids=uncovered_ids,
+        unresolved_anchor_ids=unresolved_anchor_ids,
+    )
+
+
+def score_candidate_recall(
+    cases: Sequence[ResolvedCase | EvaluationCase],
+    candidate_ids_by_query: Mapping[str, Sequence[str]],
+    chunk_to_source: Mapping[str, str],
+    *,
+    candidate_k: int,
+) -> CandidateRecall:
+    """Score source recall in the pre-rerank candidate pool at ``candidate_k``."""
+    _validate_limit(candidate_k)
+    if any(case.judgment_level != "source" for case in cases):
+        raise ValueError("score_candidate_recall requires source-level cases")
+    case_ids = [case.case_id for case in cases]
+    if not case_ids or len(case_ids) != len(set(case_ids)):
+        raise ValueError("Candidate recall requires unique, non-empty judged cases")
+    if not isinstance(candidate_ids_by_query, Mapping):
+        raise ValueError("candidate_ids_by_query must be a mapping")
+    if not isinstance(chunk_to_source, Mapping):
+        raise ValueError("chunk_to_source must be a mapping")
+    missing = set(case_ids) - set(candidate_ids_by_query)
+    extra = set(candidate_ids_by_query) - set(case_ids)
+    if missing or extra:
+        raise ValueError(
+            f"Candidate query IDs differ from judgments (missing={sorted(missing)}, "
+            f"extra={sorted(extra)})"
+        )
+
+    numerator = denominator = 0
+    per_query: dict[str, Mapping[str, Any]] = {}
+    for case in cases:
+        raw_candidates = _validate_sequence(
+            candidate_ids_by_query[case.case_id],
+            f"candidate IDs for query {case.case_id!r}",
+        )
+        candidates = raw_candidates[:candidate_k]
+        for chunk_id in candidates:
+            if not isinstance(chunk_id, str) or not chunk_id.strip():
+                raise ValueError("candidate IDs must be non-empty strings")
+        unique_candidates = tuple(dict.fromkeys(candidates))
+        candidate_sources = []
+        for chunk_id in unique_candidates:
+            source_id = chunk_to_source.get(chunk_id)
+            if not isinstance(source_id, str) or not source_id:
+                raise ValueError(
+                    f"Candidate chunk {chunk_id!r} has no indexed Source relationship"
+                )
+            candidate_sources.append(source_id)
+        candidate_source_set = set(candidate_sources)
+        relevant = set(case.relevant_ids)
+        found = tuple(sorted(candidate_source_set & relevant))
+        query_numerator = len(found)
+        query_denominator = len(relevant)
+        numerator += query_numerator
+        denominator += query_denominator
+        per_query[case.case_id] = {
+            "numerator": query_numerator,
+            "denominator": query_denominator,
+            "rate": (
+                None if query_denominator == 0 else query_numerator / query_denominator
+            ),
+            "candidate_chunk_count": len(unique_candidates),
+            "candidate_source_count": len(candidate_source_set),
+            "relevant_retrieved_source_ids": list(found),
+        }
+    return CandidateRecall(
+        numerator=numerator,
+        denominator=denominator,
+        rate=None if denominator == 0 else numerator / denominator,
+        candidate_k=candidate_k,
+        query_count=len(cases),
+        per_query=per_query,
     )

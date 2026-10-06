@@ -119,14 +119,216 @@ def _write_model_manifest(
     return manifest_path, embedding_dir, reranker_dir
 
 
-def test_cli_exposes_only_the_five_local_evaluation_commands():
+def test_cli_exposes_the_local_evaluation_commands():
     assert set(local_cli.main.commands) == {
+        "combination-experiment",
+        "resume-combination-experiment",
+        "repack-combination-experiment",
         "inventory",
         "prepare-review",
         "freeze",
         "download-models",
         "run",
     }
+
+
+def test_combination_experiment_help_exposes_versioned_inputs():
+    result = CliRunner().invoke(local_cli.main, ["combination-experiment", "--help"])
+
+    assert result.exit_code == 0, result.output
+    for flag in (
+        "--local-root",
+        "--snapshot",
+        "--embedding-model-dir",
+        "--reranker-model-dir",
+        "--artifact-dir",
+        "--conversation-fixture",
+    ):
+        assert flag in result.output
+
+    resume_help = CliRunner().invoke(
+        local_cli.main, ["resume-combination-experiment", "--help"]
+    )
+    assert resume_help.exit_code == 0, resume_help.output
+    for flag in ("--local-root", "--snapshot", "--artifact-dir", "--staging-dir"):
+        assert flag in resume_help.output
+
+    repack_help = CliRunner().invoke(
+        local_cli.main, ["repack-combination-experiment", "--help"]
+    )
+    assert repack_help.exit_code == 0, repack_help.output
+    for flag in (
+        "--local-root",
+        "--snapshot",
+        "--artifact-dir",
+        "--source-staging-dir",
+    ):
+        assert flag in repack_help.output
+
+
+def test_combination_experiment_rejects_snapshot_outside_local_root(tmp_path):
+    local_root = tmp_path / "local"
+    outside_snapshot = tmp_path / "outside-snapshot"
+    outside_snapshot.mkdir()
+
+    result = CliRunner().invoke(
+        local_cli.main,
+        [
+            "combination-experiment",
+            "--local-root",
+            str(local_root),
+            "--snapshot",
+            str(outside_snapshot),
+            "--embedding-model-dir",
+            str(tmp_path / "embedding"),
+            "--reranker-model-dir",
+            str(tmp_path / "reranker"),
+            "--artifact-dir",
+            str(local_root / "runs" / "run-1"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "snapshot" in result.output.lower()
+    assert not (local_root / "runs").exists()
+
+
+def _mock_combination_cli_prerequisites(monkeypatch, local_root: Path):
+    snapshot = local_root / "snapshots" / "v2"
+    snapshot.mkdir(parents=True)
+    monkeypatch.setattr(local_cli, "load_local_snapshot", lambda _path: object())
+    monkeypatch.setattr(local_cli, "_validate_snapshot_approval", lambda _path: None)
+    monkeypatch.setattr(
+        local_cli,
+        "_resolve_model_paths_with_manifest",
+        lambda *_args: (SimpleNamespace(), b"{}"),
+    )
+    monkeypatch.setattr(local_cli, "_require_offline_inference_process", lambda: None)
+
+    def run_combination(
+        _snapshot,
+        *,
+        artifact_dir,
+        staging_dir,
+        conversation_fixture=None,
+        **_kwargs,
+    ):
+        if conversation_fixture is not None:
+            from kotaemon.indices.knowledge.evaluation.combination_eval import (
+                load_conversation_fixture,
+            )
+
+            load_conversation_fixture(conversation_fixture)
+        staging_dir.mkdir(parents=True)
+        (staging_dir / "report.json").write_text("{}", encoding="utf-8")
+        (staging_dir / "artifact-manifest.json").write_text(
+            json.dumps({"artifacts": []}), encoding="utf-8"
+        )
+        staging_dir.rename(artifact_dir)
+
+    monkeypatch.setattr(local_cli, "run_combination_experiment", run_combination)
+    return snapshot
+
+
+def _combination_cli_args(local_root: Path, snapshot: Path, artifact_dir: Path):
+    return [
+        "combination-experiment",
+        "--local-root",
+        str(local_root),
+        "--snapshot",
+        str(snapshot),
+        "--embedding-model-dir",
+        str(local_root / "models" / "bge-m3"),
+        "--reranker-model-dir",
+        str(local_root / "models" / "bge-reranker-v2-m3"),
+        "--artifact-dir",
+        str(artifact_dir),
+    ]
+
+
+def test_combination_experiment_rejects_artifact_escape_and_overwrite(
+    tmp_path, monkeypatch
+):
+    local_root = tmp_path / "local"
+    snapshot = _mock_combination_cli_prerequisites(monkeypatch, local_root)
+    runs = local_root / "runs"
+    runs.mkdir()
+    existing = runs / "existing"
+    existing.mkdir()
+    marker = existing / "keep.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    runner = CliRunner()
+
+    escape = runner.invoke(
+        local_cli.main,
+        _combination_cli_args(local_root, snapshot, tmp_path / "outside"),
+    )
+    overwrite = runner.invoke(
+        local_cli.main,
+        _combination_cli_args(local_root, snapshot, existing),
+    )
+
+    assert escape.exit_code != 0
+    assert "artifact" in escape.output.lower()
+    assert overwrite.exit_code != 0
+    assert "already exists" in overwrite.output.lower()
+    assert marker.read_text(encoding="utf-8") == "preserve"
+
+
+def test_resume_combination_experiment_uses_selected_staging_path(
+    tmp_path, monkeypatch
+):
+    local_root = tmp_path / "local"
+    snapshot = _mock_combination_cli_prerequisites(monkeypatch, local_root)
+    runs = local_root / "runs"
+    runs.mkdir()
+    staging = runs / ".resumed.staging-synthetic"
+    staging.mkdir()
+    captured = {}
+
+    def run_combination(_snapshot, **kwargs):
+        captured.update(kwargs)
+        (staging / "report.json").write_text("{}", encoding="utf-8")
+        (staging / "artifact-manifest.json").write_text(
+            json.dumps({"artifacts": []}), encoding="utf-8"
+        )
+        staging.rename(kwargs["artifact_dir"])
+
+    monkeypatch.setattr(local_cli, "run_combination_experiment", run_combination)
+    arguments = _combination_cli_args(local_root, snapshot, runs / "resumed")
+    arguments[0] = "resume-combination-experiment"
+    arguments.extend(["--staging-dir", str(staging)])
+
+    result = CliRunner().invoke(local_cli.main, arguments)
+
+    assert result.exit_code == 0, result.output
+    assert captured["staging_dir"] == staging
+    assert captured["resume"] is True
+    assert (runs / "resumed" / "model-manifest.json").is_file()
+
+
+def test_combination_experiment_rejects_unreviewed_fixture(tmp_path, monkeypatch):
+    local_root = tmp_path / "local"
+    snapshot = _mock_combination_cli_prerequisites(monkeypatch, local_root)
+    fixture_path = local_root / "conversation-fixtures" / "unreviewed.json"
+    fixture_path.parent.mkdir(parents=True)
+    fixture_path.write_text(
+        json.dumps({"schema_version": 1, "reviewed": False, "cases": []}),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        local_cli.main,
+        [
+            *_combination_cli_args(local_root, snapshot, local_root / "runs" / "new"),
+            "--conversation-fixture",
+            str(fixture_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "explicitly reviewed" in result.output.lower()
+    assert not (local_root / "runs" / "new").exists()
 
 
 def test_prepare_review_is_local_deterministic_and_does_not_invent_gold(tmp_path):

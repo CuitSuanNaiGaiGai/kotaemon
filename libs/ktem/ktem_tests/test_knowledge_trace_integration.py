@@ -21,6 +21,7 @@ from kotaemon.indices.knowledge.planning.retrieval_plan import RetrievalPlan
 from kotaemon.indices.knowledge.retrieval.knowledge_service import KnowledgeService
 from kotaemon.indices.knowledge.retrieval.trace import RetrievalTrace
 from kotaemon.indices.qa.citation_qa import AnswerWithContextPipeline
+from kotaemon.indices.qa.citation_qa_inline import AnswerWithInlineCitation
 from kotaemon.indices.qa.format_context import PrepareEvidencePipeline
 from kotaemon.indices.rankings import BaseReranking
 from kotaemon.storages.docstores.base import BaseDocumentStore
@@ -186,6 +187,103 @@ class FakeAnsweringPipeline(BaseComponent):
 
     def prepare_citations(self, answer, docs):
         return [], []
+
+
+def test_v3_packer_counts_product_prompt_history_and_reserves():
+    docs = [
+        RetrievedDocument(
+            id_=f"budget-seed-{index}",
+            text=f"evidence segment {index} " + ("x" * 40),
+            metadata={
+                "knowledge_evidence_role": "seed",
+                "file_name": f"guide-{index}.md",
+            },
+        )
+        for index in range(2)
+    ]
+    question = 'What is the result for "the example"?'
+    history = [
+        ("older question", "older answer"),
+        ("recent question", "recent answer"),
+    ]
+    output_reserve = 17
+    format_reserve = 9
+
+    for answering_pipeline in (
+        AnswerWithContextPipeline(
+            system_prompt="System instructions",
+            qa_template=(
+                "Question={question}\nContext={context}\nLanguage={lang}\nAnswer="
+            ),
+            n_last_interactions=1,
+        ),
+        AnswerWithInlineCitation(
+            system_prompt="System instructions",
+            qa_citation_template="Citation format. Question={question}\nContext={context}",
+            n_last_interactions=1,
+        ),
+    ):
+        evidence_pipeline = PrepareEvidencePipeline(
+            max_context_length=4096, token_counter=len
+        )
+        evidence_mode, evidence, _images = evidence_pipeline(docs).content
+        prompt, _ = answering_pipeline.get_prompt(question, evidence, evidence_mode)
+        all_messages = [
+            {"role": "system", "content": answering_pipeline.system_prompt},
+            {"role": "user", "content": history[-1][0]},
+            {"role": "assistant", "content": history[-1][1]},
+            {"role": "user", "content": prompt},
+        ]
+        full_message_tokens = len(
+            json.dumps(
+                all_messages,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+        )
+        model_context = full_message_tokens + output_reserve + format_reserve - 1
+        pipeline = FullQAPipeline(
+            retrievers=[],
+            evidence_pipeline=PrepareEvidencePipeline(
+                max_context_length=model_context, token_counter=len
+            ),
+            answering_pipeline=answering_pipeline,
+            output_reserve=output_reserve,
+            format_reserve=format_reserve,
+        )
+
+        packed_docs, packed = pipeline._pack_authorized_v3_evidence(
+            docs,
+            None,
+            question=question,
+            history=history,
+        )
+        evidence_mode, evidence, _images = pipeline.evidence_pipeline(
+            packed_docs
+        ).content
+        prompt, _ = answering_pipeline.get_prompt(question, evidence, evidence_mode)
+        expected_messages = [
+            {"role": "system", "content": answering_pipeline.system_prompt},
+            {"role": "user", "content": history[-1][0]},
+            {"role": "assistant", "content": history[-1][1]},
+            {"role": "user", "content": prompt},
+        ]
+        expected_tokens = len(
+            json.dumps(
+                expected_messages,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+        )
+
+        assert packed.request_token_count == expected_tokens
+        assert packed.request_tokens_available == (
+            model_context - output_reserve - format_reserve
+        )
+        assert expected_tokens + output_reserve + format_reserve <= model_context
+        assert len(packed_docs) < len(docs)
 
 
 def _drain(generator):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from kotaemon.base import RetrievedDocument
 from kotaemon.indices.knowledge.retrieval.context_budget import (
     EvidenceBundle,
@@ -97,3 +99,49 @@ def test_rendered_header_counts_in_budget():
     )
     assert empty_context.status == "insufficient_evidence"
     assert empty_context.token_count == len(empty_rendered)
+
+
+def test_packing_respects_serialized_full_message_budget():
+    seed = make_doc("seed", "x" * 80)
+    system_prompt = "system"
+
+    def render_context(documents):
+        return json.dumps(
+            {"evidence": [document.text for document in documents]},
+            separators=(",", ":"),
+        )
+
+    def render_messages(user_payload):
+        return json.dumps(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_payload},
+            ],
+            separators=(",", ":"),
+        )
+
+    reserves = 3
+    full_request_with_seed = render_messages(render_context((seed,)))
+    budget = GenerationBudget(
+        model_context=len(full_request_with_seed) + reserves - 1,
+        output_reserve=reserves,
+        format_reserve=0,
+    )
+
+    packed = pack_evidence(
+        EvidenceBundle((seed,), (), ()),
+        budget=budget,
+        count_tokens=len,
+        base_prompt=system_prompt,
+        render_context=render_context,
+        render_budgeted_request=render_messages,
+    )
+    packed_request = render_messages(render_context(packed.documents))
+
+    assert packed.documents == ()
+    assert packed.status == "insufficient_evidence"
+    assert packed.request_token_count == len(packed_request)
+    assert packed.request_tokens_available == (
+        budget.model_context - budget.output_reserve - budget.format_reserve
+    )
+    assert len(packed_request) + reserves <= budget.model_context

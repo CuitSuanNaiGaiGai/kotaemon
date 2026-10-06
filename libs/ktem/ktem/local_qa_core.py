@@ -37,6 +37,7 @@ from kotaemon.indices.knowledge.retrieval.context_budget import (
     GenerationBudget,
     PackedContext,
     pack_evidence,
+    serialize_chat_messages,
 )
 from kotaemon.indices.knowledge.retrieval.contracts import RetrievalPolicy
 from kotaemon.indices.knowledge.retrieval.expansion import (
@@ -299,11 +300,17 @@ class LocalQA:
                 expansion_bundle,
                 budget=generation_budget,
                 count_tokens=count_tokens,
-                base_prompt=base_prompt,
+                base_prompt="",
                 render_context=lambda documents: render_generation_context(
                     clean_question,
                     [cards_by_id[document.doc_id] for document in documents],
                     user_history=bounded_user_history,
+                ),
+                render_budgeted_request=lambda user_message: serialize_chat_messages(
+                    [
+                        {"role": "system", "content": base_prompt},
+                        {"role": "user", "content": user_message},
+                    ]
                 ),
             )
             cards = tuple(
@@ -383,10 +390,22 @@ class LocalQA:
                 generation_budget.estimated if generation_budget is not None else None
             ),
             "budget_tokens_used": (
-                packed_context.token_count if packed_context is not None else None
+                (
+                    packed_context.request_token_count
+                    if packed_context.request_token_count is not None
+                    else packed_context.token_count
+                )
+                if packed_context is not None
+                else None
             ),
             "budget_tokens_available": (
-                packed_context.available_tokens if packed_context is not None else None
+                (
+                    packed_context.request_tokens_available
+                    if packed_context.request_tokens_available is not None
+                    else packed_context.available_tokens
+                )
+                if packed_context is not None
+                else None
             ),
             "packed_context_ids": (
                 [document.doc_id for document in packed_context.documents]
